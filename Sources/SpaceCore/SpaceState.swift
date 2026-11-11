@@ -28,15 +28,41 @@ public struct SpaceState: Codable, Sendable, Equatable {
         public init(name: String, port: Int) { self.name = name; self.port = port }
     }
 
-    /// A project: named ports (with hostnames), and resources in the services it uses.
+    /// A named port of a project, reachable at `http://<hostname>.localhost` (hostname without the domain).
+    public struct Endpoint: Codable, Sendable, Hashable, Identifiable {
+        public var name: String
+        public var port: Int
+        /// Label(s) before the domain, e.g. "api.proposal-generator".
+        public var hostname: String
+        public var id: String { name }
+        public init(name: String, port: Int, hostname: String) { self.name = name; self.port = port; self.hostname = hostname }
+    }
+
+    /// A pointer to something a project uses: a database, bucket… (`kind` + `name`) or a whole service
+    /// without sub-items (Redis, Mailpit, Langfuse). A plain reference: deleting either side never touches the other.
+    public struct ResourceRef: Codable, Sendable, Hashable {
+        public var service: String
+        public var kind: String?
+        public var name: String?
+        public init(service: String, kind: String? = nil, name: String? = nil) {
+            self.service = service; self.kind = kind; self.name = name
+        }
+    }
+
+    /// A project: named endpoints (port + hostname) and references to the resources it uses.
     public struct Project: Codable, Sendable, Hashable, Identifiable {
         public var name: String
-        public var services: [String]
-        /// e.g. ["web": 3100, "api": 3101]
-        public var ports: [String: Int]
+        public var endpoints: [Endpoint]
+        public var resources: [ResourceRef]
         public var id: String { name }
-        public init(name: String, services: [String], ports: [String: Int]) {
-            self.name = name; self.services = services; self.ports = ports
+        public init(name: String, endpoints: [Endpoint] = [], resources: [ResourceRef] = []) {
+            self.name = name; self.endpoints = endpoints; self.resources = resources
+        }
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            name = try c.decode(String.self, forKey: .name)
+            endpoints = try c.decodeIfPresent([Endpoint].self, forKey: .endpoints) ?? []
+            resources = try c.decodeIfPresent([ResourceRef].self, forKey: .resources) ?? []
         }
     }
 

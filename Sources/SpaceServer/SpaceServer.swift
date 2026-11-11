@@ -39,11 +39,13 @@ public enum SpaceServer {
             return SpaceState.Site(name: r.id, port: port)
         })
 
+        let projects = Projects(services: services, hosts: hosts)
+        await projects.sync()
+
         let router = Router()
         router.add(middleware: ErrorMiddleware())
         routes(router, services: services, net: net, hosts: hosts)
-        try await moreRoutes(router, services: services, net: net,
-                             projects: Projects(services: services, hosts: hosts), apiPort: port)
+        try await moreRoutes(router, services: services, net: net, projects: projects, apiPort: port)
 
         let app = Application(
             router: router,
@@ -106,17 +108,8 @@ public enum SpaceServer {
         }
         api.get("stats") { _, _ in Reply(try await services.stats()) }
 
-        // Local hostnames (http://*.localhost)
+        // Local hostnames (http://*.localhost) — read-only here; they come from project endpoints and built-in services.
         api.get("hosts") { _, _ in Reply(await hosts.status()) }
-        api.post("hosts/sites") { req, ctx in
-            let site = try await req.decode(as: SiteRequest.self, context: ctx)
-            try await hosts.addSite(name: site.name, port: site.port)
-            return Reply(await hosts.status())
-        }
-        api.delete("hosts/sites/:name") { _, ctx in
-            try await hosts.removeSite(ctx.parameters.require("name"))
-            return Reply(await hosts.status())
-        }
         api.post("hosts/restart") { _, _ in
             await hosts.stop()
             try await hosts.start()

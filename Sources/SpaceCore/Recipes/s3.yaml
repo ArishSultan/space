@@ -1,33 +1,32 @@
-id: rustfs
-name: RustFS
+id: s3
+name: S3 Storage
 icon: externaldrive.fill
-logo: rustfs.png
-color: "#1F6BFF"
-# S3-compatible object storage.
-image: rustfs/rustfs:latest
+logo: s3.png
+color: "#F2994A"
+# S3-compatible object storage: Versity S3 Gateway serving a plain directory (one folder per bucket).
+# No config file: everything is set through environment variables.
+image: versity/versitygw:latest
 ports:
   - { name: s3, container: 9000, host: 9000 }
-  - { name: console, container: 9001, host: 9001 }
 volumes:
   - { name: data, path: /data }
 env:
-  RUSTFS_ACCESS_KEY: spaceadmin
-  RUSTFS_SECRET_KEY: spaceadmin
-  RUSTFS_VOLUMES: /data
-  RUSTFS_ADDRESS: ":9000"
-  RUSTFS_CONSOLE_ENABLE: "true"
-  RUSTFS_CONSOLE_ADDRESS: ":9001"
-# The image's own user can't write to a freshly created (root-owned) volume.
-user: "0"
+  VGW_BACKEND: posix
+  VGW_BACKEND_ARG: /data
+  VGW_PORT: ":9000"
+  VGW_HEALTH: /health
+  ROOT_ACCESS_KEY: spaceadmin
+  ROOT_SECRET_KEY: spaceadmin
 memory: 512M
 cpus: 1
-adminURL: http://localhost:{port.console}/rustfs/console/
+health:
+  exec: [wget, -q, -O, /dev/null, "http://localhost:9000/health"]
 connection:
   endpoint: http://localhost:{port.s3}
   access_key: spaceadmin
   secret_key: spaceadmin
   region: us-east-1
-# The RustFS image has no CLI, so bucket actions run Amazon's aws-cli in a throwaway container.
+# The gateway image has no bucket CLI, so bucket actions run Amazon's aws-cli in a throwaway container.
 actions:
   create_bucket:
     description: Create a bucket
@@ -59,11 +58,10 @@ resources:
     create: create_bucket
     drop: drop_bucket
     connection: http://localhost:{port.s3}/{name}
-projectResource: buckets
-projectEnv:
-  S3_ENDPOINT: http://localhost:{port.s3}
-  S3_BUCKET: "{name}"
-  S3_REGION: us-east-1
-  S3_ACCESS_KEY_ID: spaceadmin
-  S3_SECRET_ACCESS_KEY: spaceadmin
-  S3_FORCE_PATH_STYLE: "true"
+    env:
+      S3_ENDPOINT: http://localhost:{port.s3}
+      S3_BUCKET: "{name}"
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY_ID: spaceadmin
+      S3_SECRET_ACCESS_KEY: spaceadmin
+      S3_FORCE_PATH_STYLE: "true"

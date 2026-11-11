@@ -26,18 +26,18 @@ actions:
   restore_latest_backup:
     description: Restore the newest backup (replaces current data)
     exec: [sh, -c, 'f=$(ls -1t /data/db/space-backups/*.archive.gz | head -1) && mongorestore -u space -p space --authenticationDatabase admin --gzip --archive=$f --drop --quiet && echo restored $f']
-  create_project:
-    description: Create a project (database + user with the same name, password = name)
+  create_dbuser:
+    description: Create a database and a user with the same name (password = name)
     params: [name]
     exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval,
            'const d = db.getSiblingDB("{name}"); d.createUser({user: "{name}", pwd: "{name}", roles: [{role: "dbOwner", db: "{name}"}]}); d.getCollection("_space").insertOne({createdAt: new Date()}); print("created")']
-  drop_project:
-    description: Delete a project's database and user
+  drop_dbuser:
+    description: Delete a database + user pair
     params: [name]
     exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval,
            'const d = db.getSiblingDB("{name}"); try { d.dropUser("{name}") } catch (e) {}; d.dropDatabase(); print("dropped")']
-  list_projects:
-    description: List projects (users named after their own database)
+  list_dbusers:
+    description: List database + user pairs (users named after their own database)
     exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval,
            'db.getSiblingDB("admin").system.users.find({$expr: {$eq: ["$user", "$db"]}}).forEach(u => print(u.user))']
   create_db:
@@ -55,14 +55,16 @@ actions:
     exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval,
            'db.adminCommand({listDatabases: 1}).databases.forEach(d => print(d.name))']
 resources:
-  - id: projects
-    kind: project
-    title: Projects
+  - id: dbusers
+    kind: "database & user"
+    title: Database + user
     hint: A database and a user with the same name (password = name).
-    list: list_projects
-    create: create_project
-    drop: drop_project
+    list: list_dbusers
+    create: create_dbuser
+    drop: drop_dbuser
     connection: mongodb://{name}:{name}@localhost:{port.mongo}/{name}
+    env:
+      MONGODB_URI: mongodb://{name}:{name}@localhost:{port.mongo}/{name}
   - id: databases
     kind: database
     title: Databases
@@ -71,7 +73,6 @@ resources:
     drop: drop_db
     protected: [admin, config, local]
     connection: mongodb://space:space@localhost:{port.mongo}/{name}?authSource=admin
+    env:
+      MONGODB_URI: mongodb://space:space@localhost:{port.mongo}/{name}?authSource=admin
 beforeUpdate: [backup]
-projectResource: projects
-projectEnv:
-  MONGODB_URI: mongodb://{name}:{name}@localhost:{port.mongo}/{name}

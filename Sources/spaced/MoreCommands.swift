@@ -14,33 +14,105 @@ struct MCPCommand: AsyncParsableCommand {
 struct ProjectsCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "project",
-        abstract: "Projects: ports + http://<name>.localhost + a database/bucket per service + .env",
-        subcommands: [ProjectList.self, ProjectCreate.self, ProjectEnv.self, ProjectDelete.self],
+        abstract: "Projects: an app's endpoints (port + http://<hostname>.localhost) and links to the resources it uses",
+        subcommands: [ProjectList.self, ProjectCreate.self, ProjectEndpoint.self, ProjectRmEndpoint.self,
+                      ProjectLink.self, ProjectUnlink.self, ProjectEnv.self, ProjectDelete.self],
         defaultSubcommand: ProjectList.self
     )
+}
+
+func printProject(_ p: ProjectView) {
+    print(p.name)
+    for e in p.endpoints { print("  \(e.up ? "●" : "○") \(e.name): \(e.url) → localhost:\(e.port)") }
+    for r in p.resources {
+        print("  uses \(r.label)\(r.kind.map { " (\($0))" } ?? "")\(r.missing == true ? " — MISSING" : "")")
+    }
 }
 
 struct ProjectList: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "ls")
     func run() async throws {
         let list: [ProjectView] = try await Daemon().get("projects")
-        if list.isEmpty { print("No projects. Create one: spaced project create acme --services postgres,rustfs,mailpit"); return }
-        for p in list {
-            let hosts = p.ports.sorted { $0.value < $1.value }.map { "http://\(p.hosts[$0.key] ?? "") → :\($0.value)" }
-            print("\(p.name)  [\(p.services.joined(separator: ", "))]  \(hosts.joined(separator: "  "))")
-        }
+        if list.isEmpty { print("No projects. Create one: spaced project create acme --endpoint api:3100 --endpoint portal:3101"); return }
+        list.forEach(printProject)
+    }
+}
+
+/// "api:3100" or "api:3100:api.acme" → endpoint request.
+func parseEndpoint(_ s: String) throws -> EndpointRequest {
+    let parts = s.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+    guard parts.count >= 2, parts.count <= 3, let port = Int(parts[1]) else {
+        throw ValidationError("Endpoint '\(s)' should look like api:3100 (or api:3100:hostname)")
+    }
+    return EndpointRequest(name: parts[0], port: port, hostname: parts.count == 3 ? parts[2] : nil)
+}
+
+/// "postgres/databases/shop" (create with a trailing "+") or just "redis".
+func parseLink(_ s: String) throws -> ResourceLinkRequest {
+    var text = s
+    let create = text.hasSuffix("+")
+    if create { text.removeLast() }
+    let parts = text.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+    switch parts.count {
+    case 1: return ResourceLinkRequest(service: parts[0], create: create ? true : nil)
+    case 3: return ResourceLinkRequest(service: parts[0], kind: parts[1], name: parts[2], create: create ? true : nil)
+    default: throw ValidationError("Link '\(s)' should look like redis or postgres/databases/shop (add + to create it)")
     }
 }
 
 struct ProjectCreate: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "create")
     @Argument var name: String
-    @Option(help: "Comma-separated services, e.g. postgres,rustfs,mailpit,redis") var services = "postgres"
-    @Option(help: "Comma-separated port names, first gets <name>.localhost") var ports = "web"
+    @Option(name: .customLong("endpoint"), help: "label:port[:hostname], e.g. api:3100. Repeatable.") var endpoints: [String] = []
+    @Option(name: .customLong("uses"), help: "Resource to link, e.g. redis or postgres/databases/shop (end with + to create it). Repeatable.") var uses: [String] = []
     func run() async throws {
         let p: ProjectView = try await Daemon().post("projects", body: ProjectRequest(
-            name: name, services: services.split(separator: ",").map(String.init), ports: ports.split(separator: ",").map(String.init)))
-        print(p.env)
+            name: name, endpoints: try endpoints.map(parseEndpoint), resources: try uses.map(parseLink)))
+        printProject(p)
+    }
+}
+
+struct ProjectEndpoint: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "add-endpoint", abstract: "Add an endpoint: a port served at http://<hostname>.localhost")
+    @Argument var project: String
+    @Argument(help: "label:port[:hostname], e.g. portal:3101") var endpoint: String
+    func run() async throws {
+        let p: ProjectView = try await Daemon().post("projects/\(project)/endpoints", body: try parseEndpoint(endpoint))
+        printProject(p)
+    }
+}
+
+struct ProjectRmEndpoint: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "rm-endpoint")
+    @Argument var project: String
+    @Argument var endpoint: String
+    func run() async throws {
+        let p: ProjectView = try await Daemon().call("DELETE", "projects/\(project)/endpoints/\(endpoint)")
+        printProject(p)
+    }
+}
+
+struct ProjectLink: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "link", abstract: "Link a resource, e.g. redis or postgres/databases/shop (end with + to create it)")
+    @Argument var project: String
+    @Argument var resource: String
+    func run() async throws {
+        let p: ProjectView = try await Daemon().post("projects/\(project)/resources", body: try parseLink(resource))
+        printProject(p)
+    }
+}
+
+struct ProjectUnlink: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "unlink", abstract: "Unlink a resource (it is not deleted)")
+    @Argument var project: String
+    @Argument var resource: String
+    func run() async throws {
+        let l = try parseLink(resource)
+        var query = ["service": l.service]
+        if let k = l.kind { query["kind"] = k }
+        if let n = l.name { query["name"] = n }
+        _ = try await SpaceAPI().raw("DELETE", "projects/\(project)/resources", query: query)
+        print("Unlinked \(resource) from \(project)")
     }
 }
 
@@ -54,11 +126,10 @@ struct ProjectEnv: AsyncParsableCommand {
 }
 
 struct ProjectDelete: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "rm")
+    static let configuration = CommandConfiguration(commandName: "rm", abstract: "Delete a project and its hostnames (linked databases, buckets… are kept)")
     @Argument var name: String
-    @Flag(help: "Also delete its databases/users/buckets") var dropData = false
     func run() async throws {
-        do { _ = try await SpaceAPI().raw("DELETE", "projects/\(name)", query: ["dropData": dropData ? "true" : "false"]) }
+        do { _ = try await SpaceAPI().raw("DELETE", "projects/\(name)") }
         catch let SpaceAPI.Failure.server(msg) { throw ValidationError(msg) }
         print("Removed \(name)")
     }

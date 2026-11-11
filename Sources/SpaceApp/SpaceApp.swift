@@ -5,6 +5,7 @@ import SwiftUI
 @main
 struct SpaceApp: App {
     @State private var model = AppModel()
+    @State private var updater = AppUpdater()
 
     init() {
         // Menu-bar only, no Dock icon (also set via LSUIElement in the bundle).
@@ -18,7 +19,7 @@ struct SpaceApp: App {
                 .task { model.start() }
         } label: {
             Image(systemName: model.runningCount > 0 ? "shippingbox.fill" : "shippingbox")
-                .task { model.start() }
+                .task { model.start(); _ = updater.isAvailable }
                 .modifier(PreviewOpener())
                 .environment(model)
         }
@@ -59,6 +60,7 @@ struct SpaceApp: App {
         Settings {
             SettingsView()
                 .environment(model)
+                .environment(updater)
         }
     }
 }

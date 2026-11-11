@@ -97,9 +97,12 @@ public struct HostsStatus: Codable, Sendable {
         public let url: String
         /// Added automatically for a built-in service (read-only, not saved in state.json).
         public let service: Bool
+        /// Owning project, for hostnames that belong to a project endpoint.
+        public let project: String?
         public var id: String { name }
-        public init(name: String, host: String, port: Int, up: Bool, url: String, service: Bool) {
+        public init(name: String, host: String, port: Int, up: Bool, url: String, service: Bool, project: String? = nil) {
             self.name = name; self.host = host; self.port = port; self.up = up; self.url = url; self.service = service
+            self.project = project
         }
     }
 
@@ -121,33 +124,71 @@ public struct HostsStatus: Codable, Sendable {
     }
 }
 
-public struct SiteRequest: Codable, Sendable {
+public struct EndpointRequest: Codable, Sendable {
+    /// Short label, e.g. "api" or "portal".
     public var name: String
+    /// The port the app listens on.
     public var port: Int
-    public init(name: String, port: Int) { self.name = name; self.port = port }
+    /// Optional hostname without the domain; default `<name>.<project>`.
+    public var hostname: String?
+    public init(name: String, port: Int, hostname: String? = nil) { self.name = name; self.port = port; self.hostname = hostname }
+}
+
+public struct ResourceLinkRequest: Codable, Sendable {
+    public var service: String
+    /// Resource kind id (e.g. `databases`, `buckets`); omit for services without sub-items (Redis, Mailpit…).
+    public var kind: String?
+    public var name: String?
+    /// Create it first if it doesn't exist (starts the service when needed).
+    public var create: Bool?
+    public init(service: String, kind: String? = nil, name: String? = nil, create: Bool? = nil) {
+        self.service = service; self.kind = kind; self.name = name; self.create = create
+    }
 }
 
 public struct ProjectRequest: Codable, Sendable {
     public var name: String
-    /// Services the project uses, e.g. ["postgres", "rustfs", "mailpit"].
-    public var services: [String]
-    /// Named ports to reserve; the first gets `<name>.localhost`, others `<port>.<name>.localhost`. Default ["web"].
-    public var ports: [String]?
-    public init(name: String, services: [String], ports: [String]? = nil) {
-        self.name = name; self.services = services; self.ports = ports
+    public var endpoints: [EndpointRequest]?
+    public var resources: [ResourceLinkRequest]?
+    public init(name: String, endpoints: [EndpointRequest]? = nil, resources: [ResourceLinkRequest]? = nil) {
+        self.name = name; self.endpoints = endpoints; self.resources = resources
     }
+}
+
+public struct EndpointView: Codable, Sendable, Hashable, Identifiable {
+    public let name: String
+    public let port: Int
+    /// Full hostname, e.g. "api.proposal-generator.localhost".
+    public let host: String
+    public let url: String
+    /// Something is listening on the port right now.
+    public let up: Bool
+    public var id: String { name }
+    public init(name: String, port: Int, host: String, url: String, up: Bool) {
+        self.name = name; self.port = port; self.host = host; self.url = url; self.up = up
+    }
+}
+
+public struct ResourceLinkView: Codable, Sendable, Hashable {
+    public let service: String
+    public let kind: String?
+    public let name: String?
+    /// The linked item no longer exists (only checked on single-project reads, when its service is running).
+    public let missing: Bool?
+    public init(service: String, kind: String?, name: String?, missing: Bool? = nil) {
+        self.service = service; self.kind = kind; self.name = name; self.missing = missing
+    }
+    public var label: String { name.map { "\(service)/\($0)" } ?? service }
 }
 
 public struct ProjectView: Codable, Sendable, Hashable, Identifiable {
     public let name: String
-    public let services: [String]
-    public let ports: [String: Int]
-    /// Hostname per port name, e.g. ["web": "acme.localhost", "api": "api.acme.localhost"].
-    public let hosts: [String: String]
-    /// Ready-to-paste .env contents.
+    public let endpoints: [EndpointView]
+    public let resources: [ResourceLinkView]
+    /// Ready-to-paste .env contents: endpoint URLs plus the linked resources' connection settings.
     public let env: String
     public var id: String { name }
-    public init(name: String, services: [String], ports: [String: Int], hosts: [String: String], env: String) {
-        self.name = name; self.services = services; self.ports = ports; self.hosts = hosts; self.env = env
+    public init(name: String, endpoints: [EndpointView], resources: [ResourceLinkView], env: String) {
+        self.name = name; self.endpoints = endpoints; self.resources = resources; self.env = env
     }
 }

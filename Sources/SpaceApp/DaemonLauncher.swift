@@ -22,6 +22,17 @@ final class DaemonLauncher {
 
     private var domain: String { "gui/\(getuid())" }
 
+    /// True the first time a different build of the app runs than last time (an update was installed). The daemon
+    /// that is still running then belongs to the old build and must be restarted. Containers keep running.
+    func appWasUpdated() -> Bool {
+        let info = Bundle.main.infoDictionary
+        let current = "\(info?["CFBundleShortVersionString"] ?? "")+\(info?["CFBundleVersion"] ?? "")"
+        let key = "lastLaunchedBuild"
+        let previous = UserDefaults.standard.string(forKey: key)
+        UserDefaults.standard.set(current, forKey: key)
+        return isBundled && previous != nil && previous != current
+    }
+
     func start() async throws {
         guard isBundled else { return try startChild() }
 

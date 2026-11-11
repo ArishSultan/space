@@ -28,6 +28,8 @@ struct GeneralSettings: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openURL) private var openURL
     @State private var openAtLogin = false
+    @State private var agents = AgentSetup()
+    @Environment(AppUpdater.self) private var updater
 
     var body: some View {
         Form {
@@ -35,6 +37,19 @@ struct GeneralSettings: View {
                 Toggle("Open Space at login", isOn: $openAtLogin)
                     .onChange(of: openAtLogin) { model.launcher.opensAtLogin = openAtLogin }
                 LabeledContent("Open the Space panel") { ShortcutRecorder(name: .togglePanel) }
+            }
+            Section("Updates") {
+                @Bindable var updater = updater
+                LabeledContent("Version", value: updater.version)
+                if updater.isAvailable {
+                    Toggle("Check for updates automatically", isOn: $updater.automaticallyChecks)
+                    Toggle("Install updates automatically", isOn: $updater.automaticallyInstalls)
+                        .disabled(!updater.automaticallyChecks)
+                    Button("Check for Updates…") { updater.checkForUpdates() }
+                } else {
+                    Text("Updates are delivered to the installed app, not to development builds.")
+                        .foregroundStyle(.secondary)
+                }
             }
             Section("Background service") {
                 LabeledContent("Status", value: model.daemonUp ? "Running" : "Not running")
@@ -44,12 +59,20 @@ struct GeneralSettings: View {
             Section("Agents (MCP)") {
                 Text("Let coding agents manage your services, databases, buckets, projects and test emails.")
                     .foregroundStyle(.secondary)
+                AgentRow(name: "Claude Code", detail: "CLI · every project", state: agents.claudeCode, busy: agents.busy,
+                         missing: "Not installed") { on in Task { await agents.setClaudeCode(on) } }
+                AgentRow(name: "Claude Desktop", detail: "Restart the app after adding", state: agents.desktop, busy: agents.busy,
+                         missing: "Not installed") { on in Task { await agents.setDesktop(on) } }
+                if let message = agents.message {
+                    Text(message).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                }
                 CopyRow(label: "Claude Code", value: "claude mcp add space -- \(Bundle.main.executableURL!.deletingLastPathComponent().appending(path: "spaced").path) mcp")
                 CopyRow(label: "HTTP", value: "http://127.0.0.1:\(SpaceAPI.defaultPort)/mcp")
             }
         }
         .formStyle(.grouped)
         .onAppear { openAtLogin = model.launcher.opensAtLogin }
+        .task { await agents.refresh() }
     }
 }
 
@@ -202,8 +225,8 @@ struct NetworkSettings: View {
                     if let error = h.routerError {
                         Text(error).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                     }
-                    LabeledContent("Sites", value: "\(h.sites.filter { !$0.service }.count)")
-                    LabeledContent("Service sites", value: "\(h.sites.filter(\.service).count)")
+                    LabeledContent("Project hostnames", value: "\(h.sites.filter { !$0.service }.count)")
+                    LabeledContent("Service hostnames", value: "\(h.sites.filter(\.service).count)")
                     Text("Browsers resolve *.localhost to this Mac on their own — no DNS, certificates or password needed. Only this Mac can use the router.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -222,6 +245,22 @@ struct NetworkSettings: View {
                         .foregroundStyle(.secondary)
                     Button(model.loggingIn ? "Waiting for browser…" : "Log in with Tailscale") { model.login(open: openURL) }
                         .disabled(model.loggingIn)
+                }
+            }
+            if model.tailnet.loggedIn {
+                Section {
+                    let online = model.peers.filter(\.online)
+                    if online.isEmpty { Text("No other Macs are online.").foregroundStyle(.secondary) }
+                    ForEach(online, id: \.name) { peer in
+                        let shared = (model.peerServices[peer.name] ?? []).filter(\.shared)
+                        ForEach(shared) { service in
+                            MountRow(peer: peer.name, service: service)
+                        }
+                    }
+                } header: {
+                    Text("Use services from other Macs")
+                } footer: {
+                    Text("Turn one on to reach it on this Mac's localhost, with the connection strings rewritten to local ports.")
                 }
             }
         }
@@ -293,5 +332,63 @@ struct ShortcutRecorder: View {
         if s.modifiers.contains(.shift) { out += "⇧" }
         if s.modifiers.contains(.command) { out += "⌘" }
         return out + (s.key == .space ? "Space" : String(s.description.drop { "⌃⌥⇧⌘".contains($0) }))
+    }
+}
+
+struct MountRow: View {
+    @Environment(AppModel.self) private var model
+    let peer: String
+    let service: RemoteService
+
+    var body: some View {
+        let mount = model.mountFor(peer, service.id)
+        HStack(spacing: 10) {
+            ServiceIcon(service: service, size: 24)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(service.name) on \(peer.replacingOccurrences(of: "space-", with: ""))")
+                Text(mount.map { m in m.localPorts.values.sorted().map { "localhost:\($0)" }.joined(separator: " · ") }
+                     ?? (service.isRunning ? "Available" : "Stopped on that Mac"))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let mount, let first = mount.connection.sorted(by: { $0.key < $1.key }).first {
+                Button("Copy", systemImage: "doc.on.doc") { model.copy(first.value) }
+                    .labelStyle(.iconOnly).buttonStyle(.borderless)
+                    .help("Copy \(first.key): \(first.value)")
+            }
+            Toggle("Use here", isOn: Binding(get: { mount != nil }, set: { model.mount(peer, service.id, $0) }))
+                .labelsHidden()
+                .disabled(model.busy.contains("\(peer)/\(service.id)"))
+        }
+    }
+}
+
+/// Add / remove Space's MCP server in one client.
+struct AgentRow: View {
+    let name: String
+    let detail: String
+    let state: AgentSetup.State
+    let busy: Bool
+    let missing: String
+    let set: (Bool) -> Void
+
+    var body: some View {
+        LabeledContent {
+            switch state {
+            case .unknown: ProgressView().controlSize(.small)
+            case .unavailable: Text(missing).foregroundStyle(.secondary)
+            case .notAdded: Button("Add") { set(true) }.disabled(busy)
+            case .added:
+                HStack(spacing: 10) {
+                    Label("Added", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    Button("Remove") { set(false) }.disabled(busy)
+                }
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 }

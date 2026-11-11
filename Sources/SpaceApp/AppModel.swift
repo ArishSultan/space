@@ -63,6 +63,13 @@ final class AppModel {
 
     static let historyLength = 90
 
+    /// Network throughput across running services, in bytes per second (from successive stats samples).
+    var networkRate: Double = 0
+    private var lastNetwork: [String: (bytes: UInt64, at: Date)] = [:]
+
+    /// Bytes Space's data volumes use on disk (loaded with the maintenance info).
+    var diskBytes: UInt64? { disk.map { $0.spaceVolumes.reduce(0) { $0 + $1.bytes } } }
+
     private var loop: Task<Void, Never>?
     private var lastPeerRefresh = Date.distantPast
 
@@ -115,6 +122,17 @@ final class AppModel {
 
     private func record(_ list: [ServiceStats]) {
         stats = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
+        var rate = 0.0
+        var seen: [String: (bytes: UInt64, at: Date)] = [:]
+        for s in list {
+            let total = (s.networkRxBytes ?? 0) + (s.networkTxBytes ?? 0)
+            if let prev = lastNetwork[s.id], s.sampledAt > prev.at, total >= prev.bytes {
+                rate += Double(total - prev.bytes) / s.sampledAt.timeIntervalSince(prev.at)
+            }
+            seen[s.id] = (total, s.sampledAt)
+        }
+        lastNetwork = seen
+        networkRate = rate
         let now = Date()
         for s in list {
             var h = history[s.id, default: []]
@@ -137,6 +155,11 @@ final class AppModel {
     // MARK: Daemon
 
     func ensureDaemon() async {
+        if launcher.appWasUpdated() {
+            // A new build was installed: replace the daemon that is still running the old one.
+            try? await launcher.start()
+            _ = await waitForDaemon()
+        }
         if await local.isUp() { daemonUp = true; return }
         do {
             try await launcher.start()
@@ -231,16 +254,6 @@ final class AppModel {
         }
     }
 
-    // MARK: Local hostnames
-
-    func addSite(name: String, port: Int) {
-        perform("site:\(name)") { [local] in _ = try await local.post("hosts/sites", body: SiteRequest(name: name, port: port), as: HostsStatus.self) }
-    }
-
-    func removeSite(_ name: String) {
-        perform("site:\(name)") { [local] in _ = try await local.delete("hosts/sites/\(name)", as: HostsStatus.self) }
-    }
-
     // MARK: Tailnet
 
     func login(open: OpenURLAction) {
@@ -266,20 +279,33 @@ final class AppModel {
 
     // MARK: Projects
 
-    func createProject(name: String, services: [String], ports: [String]) async -> ProjectView? {
+    func createProject(name: String) async -> ProjectView? {
         busy.insert("project")
         defer { busy.remove("project") }
         do {
-            let p: ProjectView = try await local.post("projects", body: ProjectRequest(name: name, services: services, ports: ports))
+            let p: ProjectView = try await local.post("projects", body: ProjectRequest(name: name))
             await refresh()
             return p
         } catch { lastError = error.localizedDescription; return nil }
     }
 
-    func deleteProject(_ name: String, dropData: Bool) {
-        perform("project:\(name)") { [local] in
-            _ = try await local.raw("DELETE", "projects/\(name)", query: ["dropData": dropData ? "true" : "false"])
+    func addEndpoint(project: String, name: String, port: Int, hostname: String?) {
+        perform("project:\(project)") { [local] in
+            _ = try await local.post("projects/\(project)/endpoints", body: EndpointRequest(name: name, port: port, hostname: hostname), as: ProjectView.self)
         }
+    }
+
+    func removeEndpoint(project: String, name: String) {
+        perform("project:\(project)") { [local] in _ = try await local.raw("DELETE", "projects/\(project)/endpoints/\(name)") }
+    }
+
+    func deleteProject(_ name: String) {
+        perform("project:\(name)") { [local] in _ = try await local.raw("DELETE", "projects/\(name)") }
+    }
+
+    /// Projects that link to this resource (shown beside it in a service's Manage tab).
+    func projectsUsing(service: String, kind: String, name: String) -> [String] {
+        projects.filter { $0.resources.contains { $0.service == service && $0.kind == kind && $0.name == name } }.map(\.name)
     }
 
     // MARK: Apps & storage (Settings)
@@ -342,6 +368,13 @@ enum Format {
         case ..<1_048_576.0: String(format: "%.0f KB", v / 1024)
         case ..<1_073_741_824.0: String(format: "%.0f MB", v / 1_048_576)
         default: String(format: "%.1f GB", v / 1_073_741_824)
+        }
+    }
+    static func rate(_ bytesPerSecond: Double) -> String {
+        switch bytesPerSecond {
+        case ..<1: "0 KB/s"
+        case ..<1_048_576.0: String(format: "%.0f KB/s", bytesPerSecond / 1024)
+        default: String(format: "%.1f MB/s", bytesPerSecond / 1_048_576)
         }
     }
     static func percent(_ v: Double) -> String { String(format: v < 10 ? "%.1f%%" : "%.0f%%", v) }

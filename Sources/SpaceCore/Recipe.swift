@@ -82,10 +82,9 @@ public struct Recipe: Codable, Sendable, Identifiable, Hashable {
     public var beforeUpdate: [String]?
     /// Extra `container run` arguments (e.g. ulimits).
     public var args: [String]?
-    /// Environment variables this service contributes to a project's .env; `{name}` = project name.
+    /// Environment variables a project gets when it links this service as a whole (services without resource
+    /// kinds: Redis, Mailpit, Langfuse). Services with kinds put theirs in `Resources.env`.
     public var projectEnv: [String: String]?
-    /// Resource kind (id) created for each project that uses this service, e.g. `projects` or `buckets`.
-    public var projectResource: String?
     /// Optional action listing connected clients, one per line (more detail than the generic TCP count).
     public var clients: String?
     public var actions: [String: Action]?
@@ -110,6 +109,8 @@ public struct Recipe: Codable, Sendable, Identifiable, Hashable {
         public var protected: [String]?
         /// Per-resource connection string; `{name}` and `{port.<name>}` placeholders.
         public var connection: String?
+        /// Environment variables a project gets for each linked item of this kind; `{name}` = the item's name.
+        public var env: [String: String]?
     }
 
     public var containerName: String { "space-\(id)" }
@@ -154,7 +155,7 @@ public enum ActionError: Error, CustomStringConvertible {
 
 extension Recipe.Action {
     /// Identifiers only — params land inside SQL/shell, so we keep them strictly safe.
-    static var paramPattern: Regex<Substring> { /^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$/ }
+    public static var paramPattern: Regex<Substring> { /^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$/ }
 
     private func resolve(_ values: [String: String], urlEncodeText: Bool) throws -> [String: String] {
         var resolved: [String: String] = [:]

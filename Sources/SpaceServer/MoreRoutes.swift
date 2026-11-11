@@ -21,10 +21,27 @@ extension SpaceServer {
         api.post("projects") { req, ctx in
             Reply(try await projects.create(try await req.decode(as: ProjectRequest.self, context: ctx)))
         }
-        api.delete("projects/:name") { req, ctx in
-            let drop = req.uri.queryParameters.get("dropData") == "true"
-            try await projects.delete(ctx.parameters.require("name"), dropData: drop)
+        api.delete("projects/:name") { _, ctx in
+            try await projects.delete(ctx.parameters.require("name"))
             return Reply(OK())
+        }
+        api.post("projects/:name/endpoints") { req, ctx in
+            Reply(try await projects.addEndpoint(ctx.parameters.require("name"),
+                                                 try await req.decode(as: EndpointRequest.self, context: ctx)))
+        }
+        api.delete("projects/:name/endpoints/:endpoint") { _, ctx in
+            Reply(try await projects.removeEndpoint(ctx.parameters.require("name"), ctx.parameters.require("endpoint")))
+        }
+        api.post("projects/:name/resources") { req, ctx in
+            Reply(try await projects.addResource(ctx.parameters.require("name"),
+                                                 try await req.decode(as: ResourceLinkRequest.self, context: ctx)))
+        }
+        // Unlink: DELETE projects/<name>/resources?service=postgres&kind=databases&name=shop_db
+        api.delete("projects/:name/resources") { req, ctx in
+            let q = req.uri.queryParameters
+            guard let service = q.get("service") else { throw HTTPError(.badRequest, message: "Missing 'service'") }
+            return Reply(try await projects.removeResource(
+                ctx.parameters.require("name"), ResourceLinkRequest(service: service, kind: q.get("kind"), name: q.get("name"))))
         }
 
         // Maintenance

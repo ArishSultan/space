@@ -43,30 +43,30 @@ import Testing
 }
 
 @Suite struct PostgresRecipeTests {
-    @Test func projectCreatesRoleAndOwnedDatabase() throws {
+    @Test func databaseUserPairCreatesRoleAndOwnedDatabase() throws {
         let pg = try #require(try RecipeStore(userDirectory: nil)["postgres"])
-        let cmd = try #require(pg.actions?["create_project"]).command(with: ["name": "shop"])
+        let cmd = try #require(pg.actions?["create_dbuser"]).command(with: ["name": "shop"])
         #expect(cmd.contains(#"CREATE ROLE "shop" LOGIN CREATEDB PASSWORD 'shop'"#))
         #expect(cmd.contains(#"CREATE DATABASE "shop" OWNER "shop""#))
     }
 
     @Test func resourceKindsAndProtection() throws {
         let pg = try #require(try RecipeStore(userDirectory: nil)["postgres"])
-        #expect(pg.resources?.map(\.id) == ["projects", "databases", "users"])
+        #expect(pg.resources?.map(\.id) == ["dbusers", "databases", "users"])
         #expect(pg.resourceKind("databases")?.protected == ["postgres", "space"])
-        #expect(pg.resourceKind("projects").map { pg.expand($0.connection!) } == "postgres://{name}:{name}@localhost:5432/{name}")
+        #expect(pg.resourceKind("dbusers").map { pg.expand($0.connection!) } == "postgres://{name}:{name}@localhost:5432/{name}")
     }
 }
 
 @Suite struct CatalogTests {
     @Test func allBuiltinRecipesDecodeWithLogos() throws {
         let store = try RecipeStore(userDirectory: nil)
-        #expect(Set(store.recipes.keys) == ["postgres", "mailpit", "redis", "rustfs", "mongodb", "clickhouse", "langfuse", "langfuse-worker"])
+        #expect(Set(store.recipes.keys) == ["postgres", "mailpit", "redis", "s3", "mongodb", "clickhouse", "langfuse", "langfuse-worker"])
         for id in store.recipes.keys { #expect(store.logoURL(id) != nil, "missing logo for \(id)") }
     }
 
-    @Test func rustfsBucketActionsRunInAwsCliWithSharedEnv() throws {
-        let rf = try #require(try RecipeStore(userDirectory: nil)["rustfs"])
+    @Test func s3BucketActionsRunInAwsCliWithSharedEnv() throws {
+        let rf = try #require(try RecipeStore(userDirectory: nil)["s3"])
         let create = try #require(rf.actions?["create_bucket"])
         #expect(create.image == "amazon/aws-cli:latest")
         #expect(create.env?["AWS_ENDPOINT_URL"] == "http://{address}:9000")
@@ -95,7 +95,7 @@ import Testing
     @Test func langfuseStackShape() throws {
         let store = try RecipeStore(userDirectory: nil)
         let lf = try #require(store["langfuse"])
-        #expect(lf.dependsOn == ["postgres", "redis", "rustfs"])
+        #expect(lf.dependsOn == ["postgres", "redis", "s3"])
         #expect(lf.parts == ["clickhouse", "langfuse-worker"])
         #expect(store["clickhouse"]?.hidden == true)
         #expect(lf.expand(lf.env!["DATABASE_URL"]!, gateway: "10.0.0.1") == "postgresql://langfuse:langfuse@10.0.0.1:5432/langfuse")

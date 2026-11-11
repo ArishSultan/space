@@ -30,21 +30,21 @@ actions:
     description: Connected clients (excludes Space's own local-socket queries)
     exec: [psql, -U, space, -d, postgres, -At, -c,
            "SELECT coalesce(nullif(application_name, ''), 'client') || ' — ' || usename || '@' || datname || ' from ' || host(client_addr) FROM pg_stat_activity WHERE backend_type = 'client backend' AND client_addr IS NOT NULL AND pid <> pg_backend_pid() ORDER BY 1"]
-  # Projects: a login role + a database it owns, both named after the project (password = name; local dev only).
-  create_project:
-    description: Create a project (user + database with the same name)
+  # Database + user: a login role + a database it owns, both with the same name (password = name; local dev only).
+  create_dbuser:
+    description: Create a database and a user with the same name
     params: [name]
     exec: [psql, -U, space, -d, postgres, -v, ON_ERROR_STOP=1,
            -c, "CREATE ROLE \"{name}\" LOGIN CREATEDB PASSWORD '{name}'",
            -c, 'CREATE DATABASE "{name}" OWNER "{name}"']
-  drop_project:
-    description: Delete a project's database and user
+  drop_dbuser:
+    description: Delete a database + user pair
     params: [name]
     exec: [psql, -U, space, -d, postgres, -v, ON_ERROR_STOP=1,
            -c, 'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)',
            -c, 'DROP ROLE IF EXISTS "{name}"']
-  list_projects:
-    description: List projects (databases owned by a role with the same name)
+  list_dbusers:
+    description: List database + user pairs (databases owned by a role with the same name)
     exec: [psql, -U, space, -d, postgres, -At, -c,
            "SELECT d.datname FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE r.rolname = d.datname AND r.rolname <> 'space' ORDER BY 1"]
   create_db:
@@ -70,14 +70,16 @@ actions:
     description: List login users
     exec: [psql, -U, space, -d, postgres, -At, -c, "SELECT rolname FROM pg_roles WHERE rolcanlogin AND rolname NOT LIKE 'pg\\_%' ORDER BY 1"]
 resources:
-  - id: projects
-    kind: project
-    title: Projects
-    hint: A user and a database with the same name — the quickest way to start a new app.
-    list: list_projects
-    create: create_project
-    drop: drop_project
+  - id: dbusers
+    kind: "database & user"
+    title: Database + user
+    hint: A user and a database with the same name — the quickest way to give an app its own database.
+    list: list_dbusers
+    create: create_dbuser
+    drop: drop_dbuser
     connection: postgres://{name}:{name}@localhost:{port.pg}/{name}
+    env:
+      DATABASE_URL: postgres://{name}:{name}@localhost:{port.pg}/{name}
   - id: databases
     kind: database
     title: Databases
@@ -86,6 +88,8 @@ resources:
     drop: drop_db
     protected: [postgres, space]
     connection: postgres://space:space@localhost:{port.pg}/{name}
+    env:
+      DATABASE_URL: postgres://space:space@localhost:{port.pg}/{name}
   - id: users
     kind: user
     title: Users
@@ -96,6 +100,3 @@ resources:
     protected: [space]
     connection: postgres://{name}:{name}@localhost:{port.pg}/postgres
 beforeUpdate: [backup]
-projectResource: projects
-projectEnv:
-  DATABASE_URL: postgres://{name}:{name}@localhost:{port.pg}/{name}

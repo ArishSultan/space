@@ -20,6 +20,8 @@ public actor Hostnames {
     private let persistent: Bool
     private var state: SpaceState
     private var serviceSites: [SpaceState.Site] = []
+    /// Hostnames of project endpoints, owned by `Projects` (routed, never saved here).
+    private var projectSites: [(site: SpaceState.Site, project: String)] = []
     private var listeners: [Int32] = []
     private var routerError: String?
     private let table = RouteTable()
@@ -111,17 +113,34 @@ public actor Hostnames {
         publish()
     }
 
+    /// Replaces the hostnames that belong to project endpoints (project name per site).
+    public func setProjectSites(_ sites: [(name: String, port: Int, project: String)]) {
+        projectSites = sites.compactMap { s in
+            guard let name = Self.normalize(s.name), (1...65535).contains(s.port) else { return nil }
+            return (SpaceState.Site(name: name, port: s.port), s.project)
+        }
+        publish()
+    }
+
+    /// Names of the built-in service hostnames, which projects can't reuse.
+    public func serviceSiteNames() -> Set<String> { Set(serviceSites.map(\.name)) }
+
+    /// Whether `raw` is a valid hostname label set ("api.acme" or "api.acme.localhost"); returns it normalised.
+    public nonisolated static func validHostname(_ raw: String) -> String? { normalize(raw) }
+
     private func reload() {
         if persistent { state = SpaceState.load() }
         publish()
     }
 
     /// User sites first, then service sites whose names aren't taken.
-    private var allSites: [(site: SpaceState.Site, service: Bool)] {
+    private var allSites: [(site: SpaceState.Site, service: Bool, project: String?)] {
+        let projects = projectSites.sorted { $0.site.name < $1.site.name }
         let user = state.sites.sorted { $0.name < $1.name }
-        let taken = Set(user.map(\.name))
+        let taken = Set(user.map(\.name)).union(projects.map(\.site.name))
         let services = serviceSites.filter { !taken.contains($0.name) }.sorted { $0.name < $1.name }
-        return user.map { ($0, false) } + services.map { ($0, true) }
+        return projects.map { ($0.site, false, $0.project) } + user.filter { u in !projects.contains { $0.site.name == u.name } }.map { ($0, false, nil) }
+            + services.map { ($0, true, nil) }
     }
 
     private func publish() {
@@ -132,12 +151,12 @@ public actor Hostnames {
 
     public func status() async -> HostsStatus {
         reload()
-        let used = Set(state.sites.map(\.port))
+        let used = Set(state.sites.map(\.port)).union(projectSites.map(\.site.port))
         let suggested = (3000..<4000).first { !used.contains($0) && Sockets.isFree(port: $0) } ?? 3000
-        let sites = allSites.map { s, service in
+        let sites = allSites.map { s, service, project in
             let host = Self.host(s.name)
             return HostsStatus.SiteView(name: s.name, host: host, port: s.port, up: Self.canConnect(s.port),
-                                        url: Self.url(host: host, routerPort: routerPort), service: service)
+                                        url: Self.url(host: host, routerPort: routerPort), service: service, project: project)
         }
         return HostsStatus(domain: Self.domain, routerPort: routerPort, routerRunning: !listeners.isEmpty,
                            routerError: routerError, sites: sites, suggestedPort: suggested)

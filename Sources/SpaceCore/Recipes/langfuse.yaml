@@ -3,16 +3,16 @@ name: Langfuse
 icon: waveform.path.ecg
 logo: langfuse.png
 color: "#E11312"
-# LLM observability. A stack: reuses the shared Postgres, Redis and RustFS, and runs its own
+# LLM observability. A stack: reuses the shared Postgres, Redis and S3 Storage, and runs its own
 # ClickHouse and worker (hidden parts, started and stopped together with this one).
 image: langfuse/langfuse:latest
 ports:
   - { name: web, container: 3000, host: 3333 }
-dependsOn: [postgres, redis, rustfs]
+dependsOn: [postgres, redis, s3]
 parts: [clickhouse, langfuse-worker]
 prepare:
-  - { service: postgres, action: create_project, params: { name: langfuse } }
-  - { service: rustfs, action: create_bucket, params: { name: langfuse } }
+  - { service: postgres, action: create_dbuser, params: { name: langfuse } }
+  - { service: s3, action: create_bucket, params: { name: langfuse } }
 env:
   HOSTNAME: "0.0.0.0"
   NODE_OPTIONS: --max-old-space-size=1536

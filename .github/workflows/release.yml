@@ -1,0 +1,95 @@
+name: Release
+
+# Push a tag like v1.2.3 to build, sign, package and publish Space. The release gets Space-1.2.3.zip and
+# appcast.xml, which installed copies read to update themselves.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: v
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          IFS=. read -r MAJOR MINOR PATCH <<<"$VERSION"
+          # Sparkle compares this number, so it must grow with every release.
+          BUILD=$(( MAJOR * 10000 + MINOR * 100 + PATCH ))
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Cache TailscaleKit
+        uses: actions/cache@v4
+        with:
+          path: Vendor/TailscaleKit.xcframework
+          key: tailscalekit-${{ runner.arch }}-${{ hashFiles('scripts/build-tailscalekit.sh') }}
+
+      - name: Build TailscaleKit
+        run: '[ -d Vendor/TailscaleKit.xcframework ] || scripts/build-tailscalekit.sh'
+
+      - name: Test
+        run: swift test
+
+      # Optional Developer ID signing: add these secrets to get a notarized app that opens without a Gatekeeper
+      # warning. Without them the app is ad-hoc signed (see README → Releasing).
+      - name: Import signing certificate
+        id: sign
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          if [ -z "$P12_BASE64" ]; then echo "No Developer ID certificate: building ad-hoc signed."; exit 0; fi
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)".*/\1/')"
+          [ -n "$IDENTITY" ] || { echo "No Developer ID Application identity in the certificate" >&2; exit 1; }
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+
+      - name: Build app
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          BUILD: ${{ steps.v.outputs.build }}
+          FEED_URL: https://github.com/${{ github.repository }}/releases/latest/download/appcast.xml
+          SIGN_IDENTITY: ${{ steps.sign.outputs.identity }}
+          SKIP_DAEMON_RESTART: "1"
+        run: scripts/bundle-app.sh
+
+      - name: Package and sign the update
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          BUILD: ${{ steps.v.outputs.build }}
+          REPO: ${{ github.repository }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          [ -n "$SPARKLE_PRIVATE_KEY" ] || { echo "Missing the SPARKLE_PRIVATE_KEY secret (see README → Releasing)" >&2; exit 1; }
+          scripts/package-release.sh
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "build/Space-$VERSION.zip" build/appcast.xml \
+            --title "Space $VERSION" --generate-notes --verify-tag

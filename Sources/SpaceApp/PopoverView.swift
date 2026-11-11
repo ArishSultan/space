@@ -1,38 +1,26 @@
-import Charts
 import SpaceCore
 import SwiftUI
 
 struct PopoverView: View {
     @Environment(AppModel.self) private var model
-    @State private var showUsage = false
     @State private var contentHeight: CGFloat = 300
     @State private var moreBelow = false
 
     /// Tallest the scrolling part may get before it scrolls (header stays fixed above it).
-    static let maxContentHeight: CGFloat = 600
+    static let maxContentHeight: CGFloat = 640
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             header
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 20) {
                     if !model.daemonUp {
                         DaemonDownCard()
                     } else {
-                        VStack(spacing: 2) {
-                            ForEach(model.panelServices) { ServiceTile(service: $0) }
-                        }
-
-                        if !model.isRemote {
-                            ProjectsSection()
-                            SitesSection()
-                        }
-
-                        if model.runningCount > 0 {
-                            UsagePanel(expanded: $showUsage)
-                        }
-
+                        ServicesSection()
+                        if !model.isRemote { ProjectsSection() }
+                        UsagePanel()
                         if model.tailnet.loggedIn, !model.peers.isEmpty, !model.isRemote {
                             PeersSection()
                         }
@@ -62,39 +50,57 @@ struct PopoverView: View {
                 ErrorBanner(message: error) { model.lastError = nil }
             }
         }
-        .padding(12)
-        .frame(width: 360)
+        .padding(16)
+        .frame(width: 420)
         .background { QuitShortcuts() }
         .connectedClientsAlert(origin: "popover")
-        .onAppear { model.visibleSurfaces += 1; Task { await model.refresh() } }
+        .onAppear { model.visibleSurfaces += 1; Task { await model.refresh(); await model.loadMaintenance() } }
         .onDisappear { model.visibleSurfaces -= 1 }
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Space").font(.headline)
-                if model.peers.contains(where: \.online) || model.isRemote {
-                    HostPicker()
-                } else {
-                    Text(model.daemonUp ? "\(model.runningCount) of \(model.panelServices.count) running" : "Service offline")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Space").font(.title3.weight(.semibold))
+                Text(model.daemonUp ? "\(model.runningCount) of \(model.panelServices.count) running" : "Service offline")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
-            Spacer()
-            GlassEffectContainer(spacing: 6) {
-                HStack(spacing: 6) {
-                    TailnetButton()
-                    SettingsButton()
-                }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .controlSize(.large)
+            Spacer(minLength: 8)
+            HStack(spacing: 14) {
+                HostPicker()
+                TailnetButton()
+                SettingsButton()
             }
+            .padding(.top, 2)
         }
-        .padding(.horizontal, 4)
     }
+}
+
+// MARK: - Shared pieces
+
+/// Plain section title with an optional trailing control.
+struct SectionHeader<Trailing: View>: View {
+    let title: String
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack {
+            Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+            Spacer()
+            trailing
+        }
+    }
+}
+
+extension SectionHeader where Trailing == EmptyView {
+    init(_ title: String) { self.init(title: title) { EmptyView() } }
+}
+
+/// Small status dot.
+struct StatusDot: View {
+    let color: Color
+    var body: some View { Circle().fill(color).frame(width: 7, height: 7) }
 }
 
 /// Switches the panel between this Mac and other Macs running Space.
@@ -106,20 +112,23 @@ struct HostPicker: View {
             Button { model.host = nil } label: {
                 Label("This Mac", systemImage: model.host == nil ? "checkmark" : "laptopcomputer")
             }
-            Divider()
-            ForEach(model.peers.filter(\.online), id: \.name) { peer in
+            let online = model.peers.filter(\.online)
+            if !online.isEmpty { Divider() }
+            ForEach(online, id: \.name) { peer in
                 Button { model.host = peer.name } label: {
                     Label(peer.name.replacingOccurrences(of: "space-", with: ""),
                           systemImage: model.host == peer.name ? "checkmark" : "desktopcomputer")
                 }
             }
         } label: {
-            HStack(spacing: 3) {
+            HStack(spacing: 6) {
                 Text(model.host.map { $0.replacingOccurrences(of: "space-", with: "") } ?? "This Mac")
-                Text("· \(model.runningCount) running").foregroundStyle(.secondary)
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .bold))
             }
-            .font(.caption)
+            .font(.callout)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.quaternary, in: .rect(cornerRadius: 8))
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -138,8 +147,10 @@ struct SettingsButton: View {
             NSApplication.shared.activate()
             openSettings()
         } label: {
-            Image(systemName: "gearshape.fill")
+            Image(systemName: "gearshape").font(.system(size: 17))
         }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
         .help("Settings")
     }
 }
@@ -156,7 +167,41 @@ struct QuitShortcuts: View {
     }
 }
 
-// MARK: - Service tile
+/// Round-less, plain `…` menu button used on every row.
+struct MoreMenuLabel: View {
+    var body: some View {
+        Image(systemName: "ellipsis")
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 26, height: 26)
+            .contentShape(.rect)
+    }
+}
+
+// MARK: - Services
+
+struct ServicesSection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "Services") {
+                if model.maintenanceBusy != nil {
+                    ProgressView().controlSize(.small)
+                } else if !model.isRemote {
+                    Button("Update All") { model.updateAll() }
+                        .buttonStyle(.plain)
+                        .font(.callout)
+                        .foregroundStyle(.tint)
+                        .help("Pull the latest image for every installed app (data is kept)")
+                }
+            }
+            VStack(spacing: 6) {
+                ForEach(model.panelServices) { ServiceTile(service: $0) }
+            }
+        }
+    }
+}
 
 struct ServiceTile: View {
     @Environment(AppModel.self) private var model
@@ -167,55 +212,33 @@ struct ServiceTile: View {
     private var busy: Bool { model.busy.contains(service.id) }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Button { openWindow.focused(id: "service", value: service.id) } label: {
-                HStack(spacing: 10) {
-                    ServiceIcon(service: service)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(service.name).font(.callout.weight(.semibold))
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                HStack(spacing: 12) {
+                    ServiceIcon(service: service, size: 34)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(service.name).font(.body.weight(.medium))
+                        HStack(spacing: 6) {
+                            StatusDot(color: status.color)
+                            Text(status.text).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                        }
                     }
+                    Spacer(minLength: 0)
                 }
+                .contentShape(.rect)
             }
             .buttonStyle(.plain)
             .pointerStyle(.link)
             .help("Details")
 
-            Spacer(minLength: 6)
+            if busy { ProgressView().controlSize(.small) }
 
-            if busy {
-                ProgressView().controlSize(.small)
-            }
-
-            if model.tailnet.loggedIn, service.isRunning || service.shared {
-                Button { model.setShared(service, !service.shared) } label: {
-                    Image(systemName: "antenna.radiowaves.left.and.right")
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(service.shared ? Color.accentColor : .secondary)
-                .help(service.shared ? "Shared with your other Macs" : "Share with your other Macs")
-                .disabled(busy)
-            }
-
-            GlassEffectContainer(spacing: 4) {
-                HStack(spacing: 4) {
-                    Button { openWindow.focused(id: "logs", value: service.id) } label: {
-                        Image(systemName: "text.alignleft").glassCircle()
-                    }
-                    .buttonStyle(.plain)
-                    .help("Logs")
-                    .disabled(service.state == "not_created")
-
-                    Menu { menu } label: { Image(systemName: "ellipsis").glassCircle() }
-                        .menuStyle(.button)
-                        .buttonStyle(.plain)
-                        .menuIndicator(.hidden)
-                        .help("More")
-                }
-            }
+            Menu { menu } label: { MoreMenuLabel() }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("More")
 
             Toggle("", isOn: Binding(get: { service.isRunning }, set: { model.setRunning(service, $0) }))
                 .toggleStyle(.switch)
@@ -223,23 +246,32 @@ struct ServiceTile: View {
                 .labelsHidden()
                 .disabled(busy)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
     }
 
-    private var subtitle: String {
-        if busy { return service.isRunning ? "Working…" : "Starting…" }
+    private var status: (text: String, color: Color) {
+        if busy { return (service.isRunning ? "Working…" : "Starting…", .orange) }
         switch service.state {
         case "running":
-            if service.healthy == false { return "Starting up…" }
-            return service.ports.values.sorted().map { "localhost:\($0)" }.joined(separator: " · ")
-        case "not_created": return "Not installed · turn on to download"
-        default: return "Stopped"
+            switch service.healthy {
+            case .some(true): return ("Running · Healthy", .green)
+            case .some(false): return ("Running · Starting up", .orange)
+            case .none: return ("Running", .green)
+            }
+        case "not_created": return ("Not created", .secondary)
+        case "stopping": return ("Stopping…", .orange)
+        default: return ("Stopped", .secondary)
         }
+    }
+
+    /// "access_key" → "Access key" (the value itself is never shown in the menu).
+    private static func label(_ key: String) -> String {
+        key.replacingOccurrences(of: "_", with: " ").capitalizedFirst
     }
 
     @ViewBuilder private var menu: some View {
         Button("Details…", systemImage: "info.circle") { openWindow.focused(id: "service", value: service.id) }
+        Button("Logs", systemImage: "text.alignleft") { openWindow.focused(id: "logs", value: service.id) }
+            .disabled(service.state == "not_created")
         if !model.manageTitles(service.id).isEmpty {
             Button("Manage \(model.manageTitles(service.id))…", systemImage: "square.stack.3d.up") {
                 openWindow.focused(id: "service", value: "\(service.id)/Manage")
@@ -248,14 +280,26 @@ struct ServiceTile: View {
         }
         if !service.connection.isEmpty {
             Divider()
-            ForEach(service.connection.sorted(by: { $0.key < $1.key }), id: \.key) { key, value in
-                Button("Copy \(key) — \(value)", systemImage: "doc.on.doc") { model.copy(value) }
+            let entries = service.connection.sorted(by: { $0.key < $1.key })
+            if entries.count == 1, let e = entries.first {
+                Button("Copy \(Self.label(e.key))", systemImage: "doc.on.doc") { model.copy(e.value) }
+            } else {
+                Menu("Copy connection", systemImage: "doc.on.doc") {
+                    ForEach(entries, id: \.key) { key, value in
+                        Button(Self.label(key)) { model.copy(value) }
+                    }
+                }
             }
         }
         if let admin = service.adminURL, let url = URL(string: admin) {
             Button("Open web UI", systemImage: "safari") { openURL(url) }
         }
         Divider()
+        if model.tailnet.loggedIn, service.isRunning || service.shared {
+            Button(service.shared ? "Stop sharing with other Macs" : "Share with other Macs",
+                   systemImage: "antenna.radiowaves.left.and.right") { model.setShared(service, !service.shared) }
+                .disabled(busy)
+        }
         Button("Restart", systemImage: "arrow.clockwise") { model.restart(service.id) }.disabled(!service.isRunning)
         Button("Update to latest image", systemImage: "arrow.down.circle") { model.pullLatest(service.id) }
     }
@@ -268,25 +312,28 @@ struct ProjectsSection: View {
     @State private var creating = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Label("Projects", systemImage: "folder")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button { creating = true } label: { Image(systemName: "plus").glassCircle(size: 22) }
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "Projects") {
+                Button { creating = true } label: { Label("New Project", systemImage: "plus") }
                     .buttonStyle(.plain)
-                    .help("New project: ports, a .localhost hostname, and a database/bucket per service")
+                    .font(.callout)
+                    .foregroundStyle(.tint)
                     .popover(isPresented: $creating, arrowEdge: .trailing) { NewProjectForm { creating = false } }
             }
-            .padding(.horizontal, 8)
-            if model.projects.isEmpty {
-                Text("A project bundles ports, a hostname and databases, with one .env to copy.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 8)
+            if let hosts = model.hosts, !hosts.routerRunning {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text(hosts.routerError ?? "The *.\(hosts.domain) router isn't running").font(.caption).lineLimit(2)
+                }
             }
-            ForEach(model.projects) { ProjectTile(project: $0) }
+            if model.projects.isEmpty {
+                Text("A project is an app you're building. Give each part of it, like an api or a portal, a port and a hostname.")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+            }
+            VStack(spacing: 8) {
+                ForEach(model.projects) { ProjectTile(project: $0) }
+            }
         }
     }
 }
@@ -295,62 +342,111 @@ struct ProjectTile: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openURL) private var openURL
     let project: ProjectView
-    @State private var copied = false
+    @State private var expanded: Bool
+    @State private var adding = false
     @State private var confirmDelete = false
 
-    private var primaryHost: String? {
-        project.ports.min { $0.value < $1.value }.flatMap { project.hosts[$0.key] }
+    init(project: ProjectView) {
+        self.project = project
+        _expanded = State(initialValue: project.endpoints.isEmpty)
+    }
+
+    private var anyUp: Bool { project.endpoints.contains(where: \.up) }
+
+    private var subtitle: String {
+        project.endpoints.isEmpty ? "No endpoints yet" : project.endpoints.map(\.name).joined(separator: " · ")
     }
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 18))
-                .foregroundStyle(.tint)
-                .frame(width: 30)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(project.name).font(.callout.weight(.semibold))
-                Text(project.ports.sorted { $0.value < $1.value }.map { "\($0.key) :\(String($0.value))" }.joined(separator: " · "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 6)
-            GlassEffectContainer(spacing: 4) {
-                HStack(spacing: 4) {
-                    Button {
-                        model.copy(project.env)
-                        copied = true
-                        Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
-                    } label: {
-                        Image(systemName: copied ? "checkmark" : "doc.on.clipboard").glassCircle()
-                    }
-                    .buttonStyle(.plain)
-                    .help("Copy .env")
-
-                    Menu {
-                        if let host = primaryHost, let url = URL(string: "http://\(host)") {
-                            Button("Open http://\(host)", systemImage: "safari") { openURL(url) }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Button { withAnimation(.snappy) { expanded.toggle() } } label: {
+                    HStack(spacing: 12) {
+                        StatusDot(color: anyUp ? .green : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(project.name).font(.body.weight(.medium))
+                            Text(subtitle).font(.callout).foregroundStyle(.secondary).lineLimit(1)
                         }
-                        Button("Copy .env", systemImage: "doc.on.clipboard") { model.copy(project.env) }
-                        Divider()
-                        Button("Remove project (keep data)", systemImage: "minus.circle") { model.deleteProject(project.name, dropData: false) }
-                        Button("Delete project and its data…", systemImage: "trash", role: .destructive) { confirmDelete = true }
-                    } label: { Image(systemName: "ellipsis").glassCircle() }
-                        .menuStyle(.button)
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                    }
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+
+                Menu { menu } label: { MoreMenuLabel() }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+            }
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(project.endpoints) { e in
+                        Button { if let u = URL(string: e.url) { openURL(u) } } label: {
+                            HStack(spacing: 8) {
+                                StatusDot(color: e.up ? .green : .secondary)
+                                Text(e.host).font(.callout)
+                                Spacer(minLength: 6)
+                                Text(":\(String(e.port))").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                            }
+                            .contentShape(.rect)
+                        }
                         .buttonStyle(.plain)
-                        .menuIndicator(.hidden)
+                        .pointerStyle(.link)
+                        .help(e.up ? "Open \(e.url)" : "Open \(e.url) — nothing is listening on :\(e.port) yet")
+                        .contextMenu {
+                            Button("Copy URL", systemImage: "doc.on.doc") { model.copy(e.url) }
+                            Button("Remove endpoint", systemImage: "trash", role: .destructive) {
+                                model.removeEndpoint(project: project.name, name: e.name)
+                            }
+                        }
+                    }
+                    if !project.resources.isEmpty {
+                        Text("Uses " + project.resources.map(\.label).joined(separator: " · "))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    Button { adding = true } label: { Label("Add endpoint", systemImage: "plus") }
+                        .buttonStyle(.plain)
+                        .font(.callout)
+                        .foregroundStyle(.tint)
+                        .popover(isPresented: $adding, arrowEdge: .trailing) {
+                            AddEndpointForm(project: project, suggestedPort: model.hosts?.suggestedPort ?? 3000) { adding = false }
+                        }
+                }
+                .padding(.leading, 19)
+            }
+        }
+        .alert("Delete \(project.name)?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) { model.deleteProject(project.name) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Its hostnames stop working. Databases, buckets and other resources it uses are kept.")
+        }
+    }
+
+    @ViewBuilder private var menu: some View {
+        ForEach(project.endpoints) { e in
+            Button("Open \(e.host)", systemImage: "safari") { if let u = URL(string: e.url) { openURL(u) } }
+        }
+        Button("Add endpoint…", systemImage: "plus") { expanded = true; adding = true }
+        Divider()
+        Button("Copy .env", systemImage: "doc.on.clipboard") { model.copy(project.env) }
+        if !project.endpoints.isEmpty {
+            Menu("Remove endpoint", systemImage: "minus.circle") {
+                ForEach(project.endpoints) { e in
+                    Button(e.name, role: .destructive) { model.removeEndpoint(project: project.name, name: e.name) }
                 }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .alert("Delete \(project.name) and its data?", isPresented: $confirmDelete) {
-            Button("Delete", role: .destructive) { model.deleteProject(project.name, dropData: true) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Its databases, users and buckets in \(project.services.joined(separator: ", ")) are removed.")
-        }
+        Divider()
+        Button("Delete project…", systemImage: "trash", role: .destructive) { confirmDelete = true }
     }
 }
 
@@ -358,197 +454,78 @@ struct NewProjectForm: View {
     @Environment(AppModel.self) private var model
     let done: () -> Void
     @State private var name = ""
-    @State private var selected: Set<String> = ["postgres"]
-    @State private var ports = "web"
-    @State private var created: ProjectView?
 
-    /// Services that contribute something to a project.
-    private var choices: [ServiceView] {
-        model.services.filter { $0.hidden != true }
-    }
+    private var valid: Bool { name.wholeMatch(of: /[a-z0-9][a-z0-9-]{1,40}[a-z0-9]/) != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let created {
-                Label("\(created.name) is ready", systemImage: "checkmark.circle.fill").font(.headline).foregroundStyle(.green)
-                ScrollView {
-                    Text(created.env).font(.caption.monospaced()).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(height: 180)
-                HStack {
-                    Spacer()
-                    Button("Copy .env") { model.copy(created.env); done() }.buttonStyle(.glassProminent)
-                }
-            } else {
-                Text("New project").font(.headline)
-                TextField("Name, e.g. acme", text: $name).textFieldStyle(.roundedBorder)
-                Text("Services").font(.caption).foregroundStyle(.secondary)
-                ForEach(choices) { s in
-                    Toggle(isOn: Binding(get: { selected.contains(s.id) },
-                                         set: { if $0 { selected.insert(s.id) } else { selected.remove(s.id) } })) {
-                        HStack(spacing: 6) { ServiceIcon(service: s, size: 16); Text(s.name) }
-                    }
-                    .toggleStyle(.checkbox)
-                }
-                TextField("Ports (comma separated)", text: $ports).textFieldStyle(.roundedBorder)
-                Text("The first port gets http://\(name.isEmpty ? "name" : name.lowercased()).localhost, others <port>.<name>.localhost.")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    if model.busy.contains("project") { ProgressView().controlSize(.small); Text("Creating…").font(.caption) }
-                    Spacer()
-                    Button("Cancel", action: done)
-                    Button("Create") {
-                        Task {
-                            created = await model.createProject(
-                                name: name.lowercased(), services: choices.map(\.id).filter(selected.contains),
-                                ports: ports.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
-                        }
-                    }
+            Text("New project").font(.headline)
+            TextField("Name, e.g. proposal-generator", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(create)
+            Text("Lowercase letters, digits and hyphens. You add its ports and hostnames next.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                if model.busy.contains("project") { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Cancel", action: done)
+                Button("Create", action: create)
                     .buttonStyle(.glassProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(name.count < 3 || model.busy.contains("project"))
-                }
+                    .disabled(!valid || model.busy.contains("project"))
             }
         }
         .padding(14)
         .frame(width: 300)
     }
-}
 
-// MARK: - Sites (local hostnames)
-
-struct SitesSection: View {
-    @Environment(AppModel.self) private var model
-    @State private var adding = false
-
-    var body: some View {
-        if let hosts = model.hosts {
-            let userSites = hosts.sites.filter { !$0.service }
-            let serviceSites = hosts.sites.filter(\.service)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Label("Sites", systemImage: "globe")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button { adding = true } label: { Image(systemName: "plus").glassCircle(size: 22) }
-                        .buttonStyle(.plain)
-                        .help("Add a hostname")
-                        .popover(isPresented: $adding, arrowEdge: .trailing) {
-                            AddSiteForm(suggestedPort: hosts.suggestedPort) { adding = false }
-                        }
-                }
-                .padding(.horizontal, 8)
-
-                if !hosts.routerRunning {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                        Text(hosts.routerError ?? "The *.\(hosts.domain) router isn't running")
-                            .font(.caption)
-                            .lineLimit(2)
-                    }
-                    .padding(.horizontal, 8)
-                }
-
-                if userSites.isEmpty {
-                    Text("Give a local app a name like acme.\(hosts.domain).")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 8)
-                }
-                ForEach(userSites) { SiteTile(site: $0) }
-
-                if !serviceSites.isEmpty {
-                    Text("Services")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 8)
-                        .padding(.top, 4)
-                    ForEach(serviceSites) { SiteTile(site: $0) }
-                }
-            }
-        }
+    private func create() {
+        guard valid else { return }
+        Task { if await model.createProject(name: name) != nil { done() } }
     }
 }
 
-struct SiteTile: View {
+struct AddEndpointForm: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openURL) private var openURL
-    let site: HostsStatus.SiteView
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: site.service ? "shippingbox" : "globe")
-                .font(.system(size: 18))
-                .foregroundStyle(site.up ? Color.accentColor : .secondary)
-                .frame(width: 30)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(site.host).font(.callout.weight(.semibold))
-                Text(site.up ? "→ localhost:\(String(site.port))" : "→ localhost:\(String(site.port)) · nothing running")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 6)
-            GlassEffectContainer(spacing: 4) {
-                HStack(spacing: 4) {
-                    Button { if let u = URL(string: site.url) { openURL(u) } } label: {
-                        Image(systemName: "safari").glassCircle()
-                    }
-                    .buttonStyle(.plain)
-                    .help("Open \(site.url)")
-
-                    Menu {
-                        Button("Copy \(site.url)", systemImage: "doc.on.doc") { model.copy(site.url) }
-                        if !site.service {
-                            Divider()
-                            Button("Remove", systemImage: "trash", role: .destructive) { model.removeSite(site.name) }
-                        }
-                    } label: { Image(systemName: "ellipsis").glassCircle() }
-                        .menuStyle(.button)
-                        .buttonStyle(.plain)
-                        .menuIndicator(.hidden)
-                }
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-    }
-}
-
-struct AddSiteForm: View {
-    @Environment(AppModel.self) private var model
+    let project: ProjectView
     let suggestedPort: Int
     let done: () -> Void
     @State private var name = ""
     @State private var port = ""
+    @State private var hostname = ""
+
+    private var label: String { name.lowercased() }
+    private var defaultHost: String { "\(label.isEmpty ? "api" : label).\(project.name)" }
+    private var host: String { (hostname.isEmpty ? defaultHost : hostname.lowercased()) + ".\(model.hosts?.domain ?? "localhost")" }
+    private var portValue: Int { Int(port) ?? suggestedPort }
+    private var valid: Bool { label.wholeMatch(of: /[a-z][a-z0-9-]{0,20}/) != nil && (port.isEmpty || Int(port) != nil) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("New hostname").font(.headline)
-            HStack(spacing: 4) {
-                Text("http://").foregroundStyle(.secondary)
-                TextField("acme", text: $name).textFieldStyle(.roundedBorder).frame(width: 110)
-                Text(".\(model.hosts?.domain ?? "localhost")").foregroundStyle(.secondary)
+            Text("New endpoint").font(.headline)
+            TextField("Name, e.g. api or portal", text: $name).textFieldStyle(.roundedBorder)
+            HStack(spacing: 6) {
+                Text("Port").foregroundStyle(.secondary)
+                TextField(String(suggestedPort), text: $port).textFieldStyle(.roundedBorder).frame(width: 80)
+                Text("your app listens on").font(.caption).foregroundStyle(.secondary)
             }
-            HStack(spacing: 4) {
-                Text("→ localhost:").foregroundStyle(.secondary)
-                TextField(String(suggestedPort), text: $port).textFieldStyle(.roundedBorder).frame(width: 70)
-            }
+            TextField("Hostname (default \(defaultHost))", text: $hostname).textFieldStyle(.roundedBorder)
+            Text("http://\(host) → localhost:\(String(portValue))")
+                .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2)
             HStack {
                 Spacer()
                 Button("Cancel", action: done)
                 Button("Add") {
-                    model.addSite(name: name.lowercased(), port: Int(port) ?? suggestedPort)
+                    model.addEndpoint(project: project.name, name: label, port: portValue, hostname: hostname.isEmpty ? nil : hostname.lowercased())
                     done()
                 }
                 .buttonStyle(.glassProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(name.isEmpty)
+                .disabled(!valid)
             }
         }
         .padding(14)
-        .frame(width: 280)
+        .frame(width: 320)
     }
 }
 
@@ -556,86 +533,67 @@ struct AddSiteForm: View {
 
 struct UsagePanel: View {
     @Environment(AppModel.self) private var model
-    @Binding var expanded: Bool
-    @State private var metric = Metric.memory
-
-    enum Metric: String, CaseIterable { case memory = "Memory", cpu = "CPU" }
-
-    private struct Point: Identifiable {
-        let service: String
-        let date: Date
-        let value: Double
-        var id: String { "\(service)-\(date.timeIntervalSince1970)" }
-    }
 
     private var running: [ServiceView] { model.services.filter(\.isRunning) }
 
-    private var points: [Point] {
-        running.flatMap { s in
-            (model.history[s.id] ?? []).map { Point(service: s.name, date: $0.date, value: metric == .memory ? $0.memory : $0.cpu) }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader("Usage")
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 0) {
+                    metric("Memory", "memorychip", .purple, Format.bytes(model.totalMemory))
+                    divider
+                    metric("CPU", "cpu", .blue, Format.percent(model.totalCPU))
+                    divider
+                    metric("Network", "globe", .green, Format.rate(model.networkRate))
+                    divider
+                    metric("Disk", "internaldrive", .orange, model.diskBytes.map { Format.bytes(Double($0)) } ?? "—")
+                }
+                if running.isEmpty {
+                    Text("Nothing is running.").font(.callout).foregroundStyle(.tertiary)
+                } else {
+                    Divider()
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                        GridRow {
+                            Text("Service").frame(maxWidth: .infinity, alignment: .leading).gridColumnAlignment(.leading)
+                            Text("Memory").gridColumnAlignment(.trailing)
+                            Text("CPU").gridColumnAlignment(.trailing)
+                        }
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                        ForEach(running) { s in
+                            let st = model.stats[s.id]
+                            GridRow {
+                                HStack(spacing: 10) {
+                                    StatusDot(color: s.tint)
+                                    Text(s.name).lineLimit(1)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                Text(Format.bytes(Double(st?.memoryBytes ?? 0))).foregroundStyle(.secondary)
+                                Text(Format.percent(st?.cpuPercent ?? 0)).foregroundStyle(.secondary)
+                            }
+                            .font(.callout.monospacedDigit())
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 16))
         }
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button { withAnimation(.snappy) { expanded.toggle() } } label: {
-                HStack {
-                    Image(systemName: "chart.bar.xaxis").foregroundStyle(.tint)
-                    Text("Usage").font(.callout.weight(.semibold))
-                    Spacer()
-                    Text("\(Format.percent(model.totalCPU)) CPU · \(Format.bytes(model.totalMemory))")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
-                }
-                .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
+    private var divider: some View {
+        Rectangle().fill(.quaternary).frame(width: 1, height: 44).padding(.horizontal, 7)
+    }
 
-            if expanded {
-                Picker("", selection: $metric) {
-                    ForEach(Metric.allCases, id: \.self) { Text($0.rawValue) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-
-                Chart(points) {
-                    AreaMark(x: .value("Time", $0.date), y: .value(metric.rawValue, $0.value), stacking: .standard)
-                        .foregroundStyle(by: .value("Service", $0.service))
-                        .interpolationMethod(.monotone)
-                }
-                .chartForegroundStyleScale(domain: running.map(\.name), range: running.map(\.tint))
-                .chartYAxis {
-                    AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { v in
-                        AxisGridLine()
-                        AxisValueLabel {
-                            if let d = v.as(Double.self) { Text(metric == .memory ? Format.bytes(d) : Format.percent(d)) }
-                        }
-                    }
-                }
-                .chartXAxis(.hidden)
-                .chartLegend(.hidden)
-                .frame(height: 110)
-
-                ForEach(running) { s in
-                    if let st = model.stats[s.id] {
-                        HStack(spacing: 6) {
-                            Circle().fill(s.tint).frame(width: 7, height: 7)
-                            Text(s.name)
-                            Spacer()
-                            Text(Format.percent(st.cpuPercent ?? 0)).monospacedDigit().frame(width: 52, alignment: .trailing)
-                            Text(Format.bytes(Double(st.memoryBytes ?? 0))).monospacedDigit().frame(width: 64, alignment: .trailing)
-                        }
-                        .font(.caption)
-                    }
-                }
-            }
+    private func metric(_ title: String, _ icon: String, _ color: Color, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: icon).font(.subheadline.weight(.semibold)).foregroundStyle(color).lineLimit(1)
+            Text(value).font(.body.weight(.medium)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
         }
-        .padding(12)
-        .glassEffect(in: .rect(cornerRadius: 14))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -674,6 +632,7 @@ struct TailnetButton: View {
             TailnetMark.image(color: color, dot: 4.2)
         }
         .menuStyle(.button)
+        .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .help(help)
     }
@@ -683,57 +642,35 @@ struct PeersSection: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("Other Macs", systemImage: "desktopcomputer")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
-            ForEach(model.peers, id: \.name) { peer in
-                let shared = (model.peerServices[peer.name] ?? []).filter(\.shared)
-                HStack(spacing: 6) {
-                    Circle().fill(peer.online ? .green : .secondary).frame(width: 6, height: 6)
-                    Text(peer.name.replacingOccurrences(of: "space-", with: "")).font(.caption.weight(.medium))
-                    if peer.online && shared.isEmpty { Text("· nothing shared").font(.caption).foregroundStyle(.tertiary) }
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader("Other Macs")
+            VStack(spacing: 10) {
+                ForEach(model.peers, id: \.name) { peer in
+                    let shared = (model.peerServices[peer.name] ?? []).filter(\.shared)
+                    HStack(spacing: 12) {
+                        StatusDot(color: peer.online ? .green : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(peer.name.replacingOccurrences(of: "space-", with: ""))
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(peer.online ? .primary : .secondary)
+                            Text(subtitle(online: peer.online, shared: shared))
+                                .font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        if peer.online {
+                            Button("Control") { model.host = peer.name }
+                                .buttonStyle(.bordered)
+                                .help("Show and control this Mac's services")
+                        }
+                    }
                 }
-                .padding(.horizontal, 8)
-                ForEach(shared) { s in PeerServiceTile(peer: peer.name, service: s) }
             }
         }
     }
-}
 
-struct PeerServiceTile: View {
-    @Environment(AppModel.self) private var model
-    let peer: String
-    let service: RemoteService
-
-    var body: some View {
-        let mount = model.mountFor(peer, service.id)
-        HStack(spacing: 10) {
-            ServiceIcon(service: service, size: 26)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(service.name).font(.callout.weight(.medium))
-                Text(mount.map { m in m.localPorts.values.sorted().map { "localhost:\($0)" }.joined(separator: " · ") }
-                     ?? (service.isRunning ? "Available" : "Stopped on that Mac"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if let mount, let first = mount.connection.sorted(by: { $0.key < $1.key }).first {
-                Button { model.copy(first.value) } label: { Image(systemName: "doc.on.doc") }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                    .help("Copy \(first.key): \(first.value)")
-            }
-            Toggle("Use here", isOn: Binding(get: { mount != nil }, set: { model.mount(peer, service.id, $0) }))
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .labelsHidden()
-                .disabled(model.busy.contains("\(peer)/\(service.id)"))
-                .help("Make it available on this Mac's localhost")
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+    private func subtitle(online: Bool, shared: [RemoteService]) -> String {
+        if !online { return "Offline · nothing shared" }
+        return shared.isEmpty ? "Nothing shared" : "Shares " + shared.map(\.name).joined(separator: ", ")
     }
 }
 
@@ -755,7 +692,7 @@ struct DaemonDownCard: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular.tint(.orange.opacity(0.12)), in: .rect(cornerRadius: 14))
+        .background(.orange.opacity(0.12), in: .rect(cornerRadius: 12))
     }
 }
 
@@ -771,7 +708,7 @@ struct ErrorBanner: View {
             Button(action: dismiss) { Image(systemName: "xmark") }.buttonStyle(.borderless)
         }
         .padding(10)
-        .glassEffect(.regular.tint(.red.opacity(0.15)), in: .rect(cornerRadius: 12))
+        .background(.red.opacity(0.15), in: .rect(cornerRadius: 12))
     }
 }
 

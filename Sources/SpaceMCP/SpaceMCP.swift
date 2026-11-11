@@ -6,9 +6,9 @@ import SpaceCore
 /// the behaviour (and safety checks) of the app and CLI.
 public enum SpaceMCP {
     public static let instructions = """
-    Space runs local development services (Postgres, MongoDB, Redis, Mailpit, RustFS/S3, Langfuse…) on this Mac \
+    Space runs local development services (Postgres, MongoDB, Redis, Mailpit, S3 storage, Langfuse…) on this Mac \
     in Apple containers. Use these tools to start/stop services, create databases, users, buckets and whole \
-    projects (with a ready .env), read logs and stats, inspect test emails, manage *.localhost hostnames and \
+    projects (an app's endpoints plus links to the databases/buckets it uses, with a ready .env), read logs and stats, inspect test emails, manage *.localhost hostnames and \
     share services with the user's other Macs. Credentials are local-dev defaults and safe to show.
     Stopping/restarting/updating a service with connected clients fails unless you pass force=true — check \
     list_clients first and tell the user who would be disconnected.
@@ -26,9 +26,11 @@ public enum SpaceMCP {
         var tool: Tool {
             var props: [String: Value] = [:]
             for (n, t, d) in params {
-                props[n] = t == "array"
-                    ? .object(["type": "array", "items": .object(["type": "string"]), "description": .string(d)])
-                    : .object(["type": .string(t), "description": .string(d)])
+                switch t {
+                case "array": props[n] = .object(["type": "array", "items": .object(["type": "string"]), "description": .string(d)])
+                case "objects": props[n] = .object(["type": "array", "items": .object(["type": "object"]), "description": .string(d)])
+                default: props[n] = .object(["type": .string(t), "description": .string(d)])
+                }
             }
             return Tool(name: name, description: description, inputSchema: .object([
                 "type": "object", "properties": .object(props), "required": .array(required.map { .string($0) }),
@@ -36,12 +38,35 @@ public enum SpaceMCP {
         }
     }
 
-    static let service = ("service", "string", "Service id, e.g. postgres, mongodb, redis, mailpit, rustfs, langfuse")
+    static let service = ("service", "string", "Service id, e.g. postgres, mongodb, redis, mailpit, s3, langfuse")
     static let force = ("force", "boolean", "Proceed even if clients are connected (they will be disconnected)")
 
     static func str(_ a: [String: Value], _ k: String) throws -> String {
         guard let v = a[k]?.stringValue, !v.isEmpty else { throw MCPError.invalidParams("Missing '\(k)'") }
         return v
+    }
+
+    static func endpoints(_ v: Value?) throws -> [EndpointRequest]? {
+        try v?.arrayValue?.map { item in
+            guard let o = item.objectValue, let name = o["name"]?.stringValue, let port = o["port"]?.intValue else {
+                throw MCPError.invalidParams("Each endpoint needs a name and a port")
+            }
+            return EndpointRequest(name: name, port: port, hostname: o["hostname"]?.stringValue)
+        }
+    }
+
+    static func links(_ v: Value?) -> [ResourceLinkRequest]? {
+        v?.arrayValue?.compactMap { item in
+            guard let o = item.objectValue, let service = o["service"]?.stringValue else { return nil }
+            return ResourceLinkRequest(service: service, kind: o["kind"]?.stringValue, name: o["name"]?.stringValue, create: o["create"]?.boolValue)
+        }
+    }
+
+    static func summary(_ p: ProjectView) -> String {
+        var out = "\(p.name)\n"
+        for e in p.endpoints { out += "  endpoint \(e.name): \(e.url) → localhost:\(e.port)\(e.up ? "" : " (nothing listening yet)")\n" }
+        for r in p.resources { out += "  uses \(r.label)\(r.kind.map { " (\($0))" } ?? "")\(r.missing == true ? " — MISSING" : "")\n" }
+        return out + "\n.env:\n\(p.env)"
     }
 
     static func pretty(_ data: Data) -> String {
@@ -138,10 +163,15 @@ public enum SpaceMCP {
             for (k, v) in a["params"]?.objectValue ?? [:] { params[k] = v.stringValue ?? v.intValue.map(String.init) ?? "" }
             return try await action(api, try str(a, "service"), try str(a, "action"), params)
         },
-        .init(name: "list_resources", description: "Projects/databases/users (Postgres, MongoDB) or buckets (RustFS) with connection strings.", params: [service, ("kind", "string", "Resource kind id, e.g. projects, databases, users, buckets")], required: ["service", "kind"]) { api, a in
-            try await get(api, "services/\(try str(a, "service"))/resources/\(try str(a, "kind"))")
+        .init(name: "list_resources", description: "Databases, database + user pairs, users (Postgres, MongoDB) or buckets (S3 storage) with connection strings, and which projects use each.", params: [service, ("kind", "string", "Resource kind id, e.g. dbusers, databases, users, buckets")], required: ["service", "kind"]) { api, a in
+            let id = try str(a, "service"), kind = try str(a, "kind")
+            let out = try await get(api, "services/\(id)/resources/\(kind)")
+            let projects: [ProjectView] = (try? await api.get("projects")) ?? []
+            let used = projects.flatMap { p in p.resources.filter { $0.service == id && $0.kind == kind }.map { ($0.name ?? "", p.name) } }
+            guard !used.isEmpty else { return out }
+            return out + "\n\nUsed by projects:\n" + used.map { "- \($0.0): \($0.1)" }.joined(separator: "\n")
         },
-        .init(name: "create_resource", description: "Create a database, user, project (user+db) or bucket. Names: lowercase letters, digits, - or _.", params: [service, ("kind", "string", "projects, databases, users or buckets"), ("name", "string", "Name")], required: ["service", "kind", "name"]) { api, a in
+        .init(name: "create_resource", description: "Create a database, a database + user pair (kind dbusers), a user or a bucket. Names: lowercase letters, digits, - or _. To also attach it to a project use add_project_resource with create=true.", params: [service, ("kind", "string", "dbusers, databases, users or buckets"), ("name", "string", "Name")], required: ["service", "kind", "name"]) { api, a in
             let id = try str(a, "service"), kind = try str(a, "kind"), name = try str(a, "name")
             let rv: RecipeView = try await api.get("services/\(id)/recipe")
             guard let create = rv.recipe.resourceKind(kind)?.create else { throw MCPError.invalidParams("\(id) can't create \(kind)") }
@@ -149,7 +179,7 @@ public enum SpaceMCP {
             let conn = rv.recipe.resourceKind(kind)?.connection.map { rv.recipe.expand($0).replacingOccurrences(of: "{name}", with: name) }
             return out + (conn.map { "\nConnection: \($0)" } ?? "")
         },
-        .init(name: "delete_resource", description: "Delete a database, user, project or bucket (its data is removed).", params: [service, ("kind", "string", "Resource kind id"), ("name", "string", "Name")], required: ["service", "kind", "name"]) { api, a in
+        .init(name: "delete_resource", description: "Delete a database, database + user pair, user or bucket (its data is removed). Projects that link to it keep a dangling link (flagged MISSING).", params: [service, ("kind", "string", "Resource kind id"), ("name", "string", "Name")], required: ["service", "kind", "name"]) { api, a in
             let id = try str(a, "service"), kind = try str(a, "kind")
             let rv: RecipeView = try await api.get("services/\(id)/recipe")
             guard let drop = rv.recipe.resourceKind(kind)?.drop else { throw MCPError.invalidParams("\(id) can't delete \(kind)") }
@@ -170,33 +200,47 @@ public enum SpaceMCP {
             try await action(api, "mailpit", "clear")
         },
 
-        // Projects & hostnames
-        .init(name: "list_projects", description: "Projects with ports, hostnames, services and .env.", params: [], required: []) { api, _ in
+        // Projects (endpoints + links to resources) & hostnames
+        .init(name: "list_projects", description: "Projects: each with its endpoints (hostname, port, whether something is listening) and the resources it links to (databases, buckets, Redis…).", params: [], required: []) { api, _ in
             try await get(api, "projects")
         },
-        .init(name: "create_project", description: "Create a project: reserves ports with http://<name>.localhost hostnames and creates a database/user/bucket in each chosen service. Returns the .env.", params: [("name", "string", "Project name (lowercase, digits, hyphens)"), ("services", "array", "Service ids, e.g. [\"postgres\", \"rustfs\", \"mailpit\", \"redis\"]"), ("ports", "array", "Named ports, first gets <name>.localhost (default [\"web\"]), e.g. [\"web\", \"api\"]")], required: ["name", "services"]) { api, a in
-            let req = ProjectRequest(name: try str(a, "name"),
-                                     services: (a["services"]?.arrayValue ?? []).compactMap(\.stringValue),
-                                     ports: a["ports"]?.arrayValue?.compactMap(\.stringValue))
-            let p: ProjectView = try await api.post("projects", body: req)
-            return "Created \(p.name). Hostnames: \(p.hosts.values.sorted().map { "http://\($0)" }.joined(separator: ", "))\n\n.env:\n\(p.env)"
+        .init(name: "get_project", description: "One project with its endpoints, linked resources (flagging any that no longer exist) and .env.", params: [("name", "string", "Project name")], required: ["name"]) { api, a in
+            try await get(api, "projects/\(try str(a, "name"))")
         },
-        .init(name: "get_project_env", description: "The .env for a project.", params: [("name", "string", "Project name")], required: ["name"]) { api, a in
+        .init(name: "create_project", description: "Create a project: the app you're building. Give it endpoints (a port your app listens on + a http://<hostname>.localhost, default <endpoint>.<project>.localhost) and link the resources it uses. A link is only a reference: with create=true the resource is created first (its service is started if needed). Returns the project and its .env.", params: [("name", "string", "Project name (lowercase letters, digits, hyphens; 3+ chars)"), ("endpoints", "objects", "Optional. Each {name, port, hostname?}, e.g. {\"name\": \"api\", \"port\": 3100}"), ("resources", "objects", "Optional. Each {service, kind?, name?, create?}, e.g. {\"service\": \"postgres\", \"kind\": \"databases\", \"name\": \"shop\", \"create\": true}; Redis/Mailpit/Langfuse take just {service}")], required: ["name"]) { api, a in
+            let req = ProjectRequest(name: try str(a, "name"), endpoints: try endpoints(a["endpoints"]), resources: links(a["resources"]))
+            let p: ProjectView = try await api.post("projects", body: req)
+            return summary(p)
+        },
+        .init(name: "add_endpoint", description: "Add an endpoint to a project: a port your app listens on, served at http://<hostname>.localhost.", params: [("project", "string", "Project name"), ("name", "string", "Endpoint label, e.g. api or portal"), ("port", "integer", "Port the app listens on"), ("hostname", "string", "Optional hostname without .localhost (default <name>.<project>)")], required: ["project", "name", "port"]) { api, a in
+            guard let port = a["port"]?.intValue else { throw MCPError.invalidParams("Missing 'port'") }
+            let p: ProjectView = try await api.post("projects/\(try str(a, "project"))/endpoints",
+                body: EndpointRequest(name: try str(a, "name"), port: port, hostname: a["hostname"]?.stringValue))
+            return summary(p)
+        },
+        .init(name: "remove_endpoint", description: "Remove an endpoint (and its hostname) from a project.", params: [("project", "string", "Project name"), ("name", "string", "Endpoint label")], required: ["project", "name"]) { api, a in
+            pretty(try await api.raw("DELETE", "projects/\(try str(a, "project"))/endpoints/\(try str(a, "name"))"))
+        },
+        .init(name: "add_project_resource", description: "Link a resource to a project so its connection settings land in the project's .env. With create=true, creates the database/bucket first (starting the service if it's stopped). Postgres/MongoDB kinds: dbusers (database + user), databases, users; S3 storage: buckets. Redis, Mailpit and Langfuse: leave out kind and name.", params: [("project", "string", "Project name"), service, ("kind", "string", "Resource kind id from list_actions"), ("name", "string", "Resource name"), ("create", "boolean", "Create it if it doesn't exist")], required: ["project", "service"]) { api, a in
+            let p: ProjectView = try await api.post("projects/\(try str(a, "project"))/resources",
+                body: ResourceLinkRequest(service: try str(a, "service"), kind: a["kind"]?.stringValue, name: a["name"]?.stringValue, create: a["create"]?.boolValue))
+            return summary(p)
+        },
+        .init(name: "remove_project_resource", description: "Unlink a resource from a project. The resource itself is not deleted (use delete_resource for that).", params: [("project", "string", "Project name"), service, ("kind", "string", "Resource kind id"), ("name", "string", "Resource name")], required: ["project", "service"]) { api, a in
+            var q = ["service": try str(a, "service")]
+            if let k = a["kind"]?.stringValue { q["kind"] = k }
+            if let n = a["name"]?.stringValue { q["name"] = n }
+            return pretty(try await api.raw("DELETE", "projects/\(try str(a, "project"))/resources", query: q))
+        },
+        .init(name: "get_project_env", description: "The .env for a project: endpoint URLs plus the linked resources' connection settings.", params: [("name", "string", "Project name")], required: ["name"]) { api, a in
             let p: ProjectView = try await api.get("projects/\(try str(a, "name"))")
             return p.env
         },
-        .init(name: "delete_project", description: "Delete a project's hostnames; with drop_data also its databases/users/buckets.", params: [("name", "string", "Project name"), ("drop_data", "boolean", "Also delete its data")], required: ["name"]) { api, a in
-            pretty(try await api.raw("DELETE", "projects/\(try str(a, "name"))", query: ["dropData": a["drop_data"]?.boolValue == true ? "true" : "false"]))
+        .init(name: "delete_project", description: "Delete a project and its hostnames. Linked databases, buckets etc. are kept (delete them with delete_resource).", params: [("name", "string", "Project name")], required: ["name"]) { api, a in
+            pretty(try await api.raw("DELETE", "projects/\(try str(a, "name"))"))
         },
-        .init(name: "list_sites", description: "Local hostnames (http://<name>.localhost → localhost:<port>).", params: [], required: []) { api, _ in
+        .init(name: "list_sites", description: "All routed hostnames (http://<name>.localhost → localhost:<port>): project endpoints and built-in service UIs.", params: [], required: []) { api, _ in
             try await get(api, "hosts")
-        },
-        .init(name: "add_site", description: "Route http://<name>.localhost to a local port.", params: [("name", "string", "e.g. acme or api.acme"), ("port", "integer", "Local port")], required: ["name", "port"]) { api, a in
-            guard let port = a["port"]?.intValue else { throw MCPError.invalidParams("Missing 'port'") }
-            return try await post(api, "hosts/sites", SiteRequest(name: try str(a, "name"), port: port))
-        },
-        .init(name: "remove_site", description: "Remove a local hostname.", params: [("name", "string", "Site name")], required: ["name"]) { api, a in
-            pretty(try await api.raw("DELETE", "hosts/sites/\(try str(a, "name"))"))
         },
 
         // Other Macs (Tailscale)

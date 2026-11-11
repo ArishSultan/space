@@ -535,6 +535,10 @@ struct ResourceList: View {
                                 .padding(.horizontal, 6).padding(.vertical, 1)
                                 .background(.quaternary, in: .capsule)
                         }
+                        let users = model.projectsUsing(service: service.id, kind: resources.id, name: item.name)
+                        if !users.isEmpty {
+                            Text("used by \(users.joined(separator: ", "))").font(.caption).foregroundStyle(.secondary)
+                        }
                         Spacer()
                         if let c = item.connection {
                             Text(c).font(.caption.monospaced()).foregroundStyle(.secondary)

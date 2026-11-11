@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      # TailscaleKit takes minutes to build from source; it only changes with the pinned revision in the script.
+      - name: Cache TailscaleKit
+        uses: actions/cache@v4
+        with:
+          path: Vendor/TailscaleKit.xcframework
+          key: tailscalekit-${{ runner.arch }}-${{ hashFiles('scripts/build-tailscalekit.sh') }}
+
+      - name: Build TailscaleKit
+        run: '[ -d Vendor/TailscaleKit.xcframework ] || scripts/build-tailscalekit.sh'
+
+      - name: Test
+        run: swift test
+
+      # Make sure the app still packages (ad-hoc signed, no update feed).
+      - name: Package app
+        env:
+          SKIP_DAEMON_RESTART: "1"
+        run: scripts/bundle-app.sh

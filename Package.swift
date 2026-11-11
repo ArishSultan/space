@@ -16,6 +16,8 @@ let package = Package(
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.28.1"),
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1"),
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts.git", from: "2.4.0"),
+        // Auto-update for the released app (EdDSA-signed appcast on GitHub Releases).
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.9.0"),
     ],
     targets: [
         .target(
@@ -49,6 +51,7 @@ let package = Package(
         .executableTarget(name: "SpaceApp", dependencies: [
             "SpaceCore",
             .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
+            .product(name: "Sparkle", package: "Sparkle"),
         ]),
         .testTarget(name: "SpaceCoreTests", dependencies: ["SpaceCore", "SpaceNet"]),
     ]
