@@ -34,7 +34,7 @@ struct GeneralSettings: View {
             Section {
                 Toggle("Open Space at login", isOn: $openAtLogin)
                     .onChange(of: openAtLogin) { model.launcher.opensAtLogin = openAtLogin }
-                KeyboardShortcuts.Recorder("Open the Space panel:", name: .togglePanel)
+                LabeledContent("Open the Space panel") { ShortcutRecorder(name: .togglePanel) }
             }
             Section("Background service") {
                 LabeledContent("Status", value: model.daemonUp ? "Running" : "Not running")
@@ -226,5 +226,72 @@ struct NetworkSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - Shortcut recorder
+
+/// Native recorder for a global shortcut. (KeyboardShortcuts' own Recorder loads its localized strings from a
+/// SwiftPM resource bundle that can't live inside a signed .app, so we only use the package for registration.)
+struct ShortcutRecorder: View {
+    let name: KeyboardShortcuts.Name
+    @State private var shortcut: KeyboardShortcuts.Shortcut?
+    @State private var recording = false
+    @State private var monitor: Any?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button {
+                recording ? stop() : start()
+            } label: {
+                Text(recording ? "Press keys…" : (shortcut.map(Self.label) ?? "Record shortcut"))
+                    .monospaced()
+                    .frame(minWidth: 110)
+            }
+            .buttonStyle(.glass)
+            .help(recording ? "Press a key with ⌘, ⌥ or ⌃ — Esc cancels" : "Click to record a new shortcut")
+            if shortcut != nil, !recording {
+                Button("Clear", systemImage: "xmark.circle.fill") {
+                    KeyboardShortcuts.setShortcut(nil, for: name)
+                    shortcut = nil
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .onAppear { shortcut = KeyboardShortcuts.getShortcut(for: name) }
+        .onDisappear { stop() }
+    }
+
+    private func start() {
+        recording = true
+        KeyboardShortcuts.disable(name)
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 { stop(); return nil }  // Esc cancels
+            let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            guard !mods.subtracting(.shift).isEmpty, let new = KeyboardShortcuts.Shortcut(event: event) else { return nil }
+            KeyboardShortcuts.setShortcut(new, for: name)
+            shortcut = new
+            stop()
+            return nil
+        }
+    }
+
+    private func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        if recording { KeyboardShortcuts.enable(name) }
+        recording = false
+    }
+
+    /// e.g. "⌃⌥S". Built here because the package's Space-key label needs its resource bundle.
+    static func label(_ s: KeyboardShortcuts.Shortcut) -> String {
+        var out = ""
+        if s.modifiers.contains(.control) { out += "⌃" }
+        if s.modifiers.contains(.option) { out += "⌥" }
+        if s.modifiers.contains(.shift) { out += "⇧" }
+        if s.modifiers.contains(.command) { out += "⌘" }
+        return out + (s.key == .space ? "Space" : String(s.description.drop { "⌃⌥⇧⌘".contains($0) }))
     }
 }
