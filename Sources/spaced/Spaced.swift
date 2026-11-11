@@ -8,7 +8,7 @@ struct Spaced: AsyncParsableCommand {
         commandName: "spaced",
         abstract: "Space: dev services on Apple container.",
         subcommands: [Recipes.self, Status.self, Start.self, Stop.self, Restart.self, Recreate.self,
-                      Pull.self, Stats.self, Logs.self, Action.self, Serve.self, Net.self, Hosts.self]
+                      Pull.self, Stats.self, Logs.self, Action.self, Serve.self, Net.self, Hosts.self, ProjectsCommand.self, SystemCommand.self, MCPCommand.self]
     )
 
     static func main() async {

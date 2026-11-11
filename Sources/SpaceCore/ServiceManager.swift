@@ -12,6 +12,7 @@ public struct ServiceStatus: Codable, Sendable {
     public let adminURL: String?
     public let icon: String?
     public let color: String?
+    public let hidden: Bool
 }
 
 public struct ServiceStats: Codable, Sendable {
@@ -33,6 +34,15 @@ public actor ServiceManager {
     public let cli: ContainerCLI
     public private(set) var store: RecipeStore
     private var lastCPU: [String: (usec: UInt64, at: Date)] = [:]
+    private var cachedGateway: String?
+
+    /// Host address as seen from containers; services are also published there so stacks can reach them.
+    public func gateway() async -> String {
+        if let cachedGateway { return cachedGateway }
+        let g = await cli.gateway() ?? Recipe.defaultGateway
+        cachedGateway = g
+        return g
+    }
 
     public init(cli: ContainerCLI, store: RecipeStore) {
         self.cli = cli
@@ -46,18 +56,34 @@ public actor ServiceManager {
 
     public func reloadRecipes() throws { store = try RecipeStore() }
 
-    public var recipes: [Recipe] { store.all }
+    public var recipes: [Recipe] {
+        let overrides = SpaceState.load().images
+        return store.all.map { Self.applying(overrides, to: $0) }
+    }
 
     public func recipe(_ id: String) throws -> Recipe {
         guard let r = store[id] else { throw ServiceError.unknownService(id) }
-        return r
+        return Self.applying(SpaceState.load().images, to: r)
+    }
+
+    /// The image the recipe ships with (before user overrides).
+    public func defaultImage(_ id: String) throws -> String {
+        guard let r = store[id] else { throw ServiceError.unknownService(id) }
+        return r.image
+    }
+
+    static func applying(_ overrides: [String: String], to r: Recipe) -> Recipe {
+        guard let img = overrides[r.id], !img.isEmpty else { return r }
+        var copy = r
+        copy.image = img
+        return copy
     }
 
     // MARK: Status
 
     public func status() async throws -> [ServiceStatus] {
         let containers = Dictionary(try await cli.list().map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        return store.all.map { r in
+        return recipes.map { r in
             let c = containers[r.containerName]
             return ServiceStatus(
                 id: r.id, name: r.name, image: c?.image ?? r.image,
@@ -65,8 +91,8 @@ public actor ServiceManager {
                 address: c?.addresses.first.map { $0.split(separator: "/").first.map(String.init) ?? $0 },
                 ports: Dictionary(uniqueKeysWithValues: r.ports.map { ($0.name, $0.host) }),
                 connection: r.connectionInfo,
-                adminURL: r.adminURL.map(r.expand),
-                icon: r.icon, color: r.color
+                adminURL: r.adminURL.map { r.expand($0) },
+                icon: r.icon, color: r.color, hidden: r.hidden ?? false
             )
         }
     }
@@ -80,8 +106,17 @@ public actor ServiceManager {
 
     public func start(_ id: String) async throws {
         let r = try recipe(id)
-        for dep in r.dependsOn ?? [] where try await status(dep).state != .running {
-            try await start(dep)
+        // Shared services first, healthy before we continue.
+        for dep in r.dependsOn ?? [] {
+            if try await status(dep).state != .running { try await start(dep) }
+            try await waitHealthy(dep)
+        }
+        for step in r.prepare ?? [] {
+            _ = try? await runAction(step.service, step.action, params: step.params ?? [:])  // "already exists" is fine
+        }
+        for part in r.parts ?? [] {
+            if try await status(part).state != .running { try await start(part) }
+            try await waitHealthy(part)
         }
         let existing = try await cli.list().first { $0.id == r.containerName }
         if let existing {
@@ -89,7 +124,17 @@ public actor ServiceManager {
             return
         }
         for v in r.volumes ?? [] { try await cli.ensureVolume(r.volumeName(v)) }
-        try await cli.run(Self.runArguments(for: r))
+        try await cli.run(Self.runArguments(for: r, gateway: await gateway()))
+    }
+
+    /// Waits until the service's health check passes (or it has none and is running).
+    public func waitHealthy(_ id: String, timeout: Duration = .seconds(120)) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if (try? await isHealthy(id)) == true { return }
+            try await Task.sleep(for: .seconds(1))
+        }
+        throw ServiceError.notHealthy(id)
     }
 
     public func stop(_ id: String) async throws {
@@ -97,6 +142,7 @@ public actor ServiceManager {
         if try await cli.list().contains(where: { $0.id == r.containerName && $0.isRunning }) {
             try await cli.stop(r.containerName)
         }
+        for part in r.parts ?? [] { try await stop(part) }
     }
 
     public func restart(_ id: String) async throws {
@@ -114,20 +160,35 @@ public actor ServiceManager {
         try await start(id)
     }
 
+    /// Pulls the latest image (and its stack parts'), running `beforeUpdate` actions (e.g. backups) first.
     public func pullLatest(_ id: String) async throws {
         let r = try recipe(id)
+        if try await status(id).state == .running {
+            for action in r.beforeUpdate ?? [] {
+                let res = try await runAction(id, action)
+                guard res.ok else { throw ActionError.failed("Update cancelled — \(action) failed: \(res.output)") }
+            }
+        }
         try await cli.pull(r.image)
+        for part in r.parts ?? [] {
+            let pr = try recipe(part)
+            try await cli.pull(pr.image)
+            if try await cli.list().contains(where: { $0.id == pr.containerName }) { try await cli.delete(pr.containerName) }
+        }
         try await recreate(id)
     }
 
-    static func runArguments(for r: Recipe) -> [String] {
+    /// Ports are published on 127.0.0.1 only. Containers reach shared services at `{gateway}:<port>`
+    /// through spaced's gateway relay (SpaceNet.GatewayRelay), which stays valid when services restart.
+    static func runArguments(for r: Recipe, gateway: String = Recipe.defaultGateway) -> [String] {
         var args = ["--name", r.containerName, "--label", "space.service=\(r.id)"]
         for p in r.ports { args += ["--publish", "127.0.0.1:\(p.host):\(p.container)"] }
         for v in r.volumes ?? [] { args += ["--volume", "\(r.volumeName(v)):\(v.path)"] }
-        for (k, v) in (r.env ?? [:]).sorted(by: { $0.key < $1.key }) { args += ["--env", "\(k)=\(v)"] }
+        for (k, v) in (r.env ?? [:]).sorted(by: { $0.key < $1.key }) { args += ["--env", "\(k)=\(r.expand(v, gateway: gateway))"] }
         if let u = r.user { args += ["--user", u] }
         if let m = r.memory { args += ["--memory", m] }
         if let c = r.cpus { args += ["--cpus", String(c)] }
+        args += r.args ?? []
         return args + [r.image]
     }
 
@@ -136,6 +197,11 @@ public actor ServiceManager {
     public func isHealthy(_ id: String) async throws -> Bool {
         let r = try recipe(id)
         guard let health = r.health else { return try await status(id).state == .running }
+        if health.exec.first?.hasPrefix("http") == true, let url = URL(string: r.expand(health.exec[0])) {
+            // HTTP health check, run from spaced (for images without a shell).
+            let (_, resp) = try await URLSession.shared.data(from: url)
+            return ((resp as? HTTPURLResponse)?.statusCode ?? 500) < 400
+        }
         return try await cli.execIn(r.containerName, health.exec).status == 0
     }
 
@@ -143,7 +209,7 @@ public actor ServiceManager {
 
     public func stats() async throws -> [ServiceStats] {
         let now = Date()
-        let byName = Dictionary(uniqueKeysWithValues: store.all.map { ($0.containerName, $0.id) })
+        let byName = Dictionary(uniqueKeysWithValues: recipes.map { ($0.containerName, $0.id) })
         return try await cli.stats().compactMap { s in
             guard let id = byName[s.id] else { return nil }
             var cpu: Double?
@@ -263,16 +329,27 @@ public actor ServiceManager {
            (r.resources ?? []).contains(where: { $0.drop == action && ($0.protected ?? []).contains(name) }) {
             throw ActionError.protected(name)
         }
+        if a.http != nil {
+            var req = URLRequest(url: URL(string: r.expand(try a.url(with: params)))!)
+            req.httpMethod = a.http?.method ?? "GET"
+            req.timeoutInterval = 30
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = String(decoding: data, as: UTF8.self)
+            let ok = (200..<300).contains(code)
+            return ActionResult(ok: ok, output: (ok ? a.extracted(body) : "HTTP \(code): \(body)").trimmingCharacters(in: .whitespacesAndNewlines))
+        }
         let command = try a.command(with: params)
         let result: CommandResult
         if let image = a.image {
             guard let address = try await status(id).address else { throw ServiceError.notRunning(id) }
-            let fill = { (v: String) in v.replacingOccurrences(of: "{address}", with: address) }
+            let gw = await gateway()
+            let fill = { (v: String) in r.expand(v.replacingOccurrences(of: "{address}", with: address), gateway: gw) }
             result = try await cli.runOnce(image: image, env: (a.env ?? [:]).mapValues(fill), args: command.map(fill))
         } else {
             result = try await cli.execIn(r.containerName, command)
         }
-        let output = result.status == 0 ? result.stdout : result.stderr + result.stdout
+        let output = result.status == 0 ? a.extracted(result.stdout) : result.stderr + result.stdout
         return ActionResult(ok: result.status == 0, output: output.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }
@@ -280,10 +357,12 @@ public actor ServiceManager {
 public enum ServiceError: Error, CustomStringConvertible {
     case unknownService(String)
     case notRunning(String)
+    case notHealthy(String)
     public var description: String {
         switch self {
         case .unknownService(let id): "Unknown service '\(id)'"
         case .notRunning(let id): "'\(id)' isn't running"
+        case .notHealthy(let id): "'\(id)' didn't become healthy in time — check its logs"
         }
     }
 }

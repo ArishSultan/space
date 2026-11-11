@@ -19,12 +19,15 @@ public struct ServiceView: Codable, Sendable, Identifiable, Hashable {
     public let icon: String?
     /// Hex colour, e.g. `#336791`.
     public let color: String?
+    /// Part of a stack (e.g. Langfuse's ClickHouse); not shown in the main list.
+    public let hidden: Bool?
 
     public init(id: String, name: String, image: String, state: String, healthy: Bool?, shared: Bool,
-                ports: [String: Int], connection: [String: String], adminURL: String?, icon: String?, color: String?) {
+                ports: [String: Int], connection: [String: String], adminURL: String?, icon: String?, color: String?,
+                hidden: Bool? = nil) {
         self.id = id; self.name = name; self.image = image; self.state = state; self.healthy = healthy
         self.shared = shared; self.ports = ports; self.connection = connection; self.adminURL = adminURL
-        self.icon = icon; self.color = color
+        self.icon = icon; self.color = color; self.hidden = hidden
     }
 
     public var isRunning: Bool { state == "running" }
@@ -82,7 +85,7 @@ public struct ClientsInfo: Codable, Sendable, Hashable {
     public init(count: Int, clients: [String]) { self.count = count; self.clients = clients }
 }
 
-/// Local hostname routing status (Caddy + dnsmasq under *.space.test).
+/// Local hostname routing status: `http://<name>.localhost` → localhost:<port> via spaced's built-in router.
 public struct HostsStatus: Codable, Sendable {
     public struct SiteView: Codable, Sendable, Hashable, Identifiable {
         public let name: String
@@ -90,33 +93,31 @@ public struct HostsStatus: Codable, Sendable {
         public let port: Int
         /// Something is listening on the target port right now.
         public let up: Bool
-        public let urls: [String]
+        /// e.g. "http://acme.localhost".
+        public let url: String
+        /// Added automatically for a built-in service (read-only, not saved in state.json).
+        public let service: Bool
         public var id: String { name }
-        public init(name: String, host: String, port: Int, up: Bool, urls: [String]) {
-            self.name = name; self.host = host; self.port = port; self.up = up; self.urls = urls
+        public init(name: String, host: String, port: Int, up: Bool, url: String, service: Bool) {
+            self.name = name; self.host = host; self.port = port; self.up = up; self.url = url; self.service = service
         }
     }
 
     public let domain: String
-    public let caddyInstalled: Bool
-    public let dnsmasqInstalled: Bool
-    /// /etc/resolver/<domain> points at our dnsmasq.
-    public let resolverInstalled: Bool
-    /// Caddy's local root certificate is trusted by the system.
-    public let certificateTrusted: Bool
-    public let proxyRunning: Bool
-    public let dnsRunning: Bool
+    /// Port the Host-header router listens on (80).
+    public let routerPort: Int
+    public let routerRunning: Bool
+    /// Why the router couldn't start (e.g. port 80 already in use).
+    public let routerError: String?
     public let sites: [SiteView]
     /// Next suggested port for a new site.
     public let suggestedPort: Int
 
-    public var ready: Bool { caddyInstalled && dnsmasqInstalled && resolverInstalled && certificateTrusted }
+    public var ready: Bool { routerRunning }
 
-    public init(domain: String, caddyInstalled: Bool, dnsmasqInstalled: Bool, resolverInstalled: Bool,
-                certificateTrusted: Bool, proxyRunning: Bool, dnsRunning: Bool, sites: [SiteView], suggestedPort: Int) {
-        self.domain = domain; self.caddyInstalled = caddyInstalled; self.dnsmasqInstalled = dnsmasqInstalled
-        self.resolverInstalled = resolverInstalled; self.certificateTrusted = certificateTrusted
-        self.proxyRunning = proxyRunning; self.dnsRunning = dnsRunning; self.sites = sites; self.suggestedPort = suggestedPort
+    public init(domain: String, routerPort: Int, routerRunning: Bool, routerError: String?, sites: [SiteView], suggestedPort: Int) {
+        self.domain = domain; self.routerPort = routerPort; self.routerRunning = routerRunning
+        self.routerError = routerError; self.sites = sites; self.suggestedPort = suggestedPort
     }
 }
 
@@ -126,11 +127,27 @@ public struct SiteRequest: Codable, Sendable {
     public init(name: String, port: Int) { self.name = name; self.port = port }
 }
 
-public struct SetupScript: Codable, Sendable {
-    /// Shell script to run once with administrator privileges ("" when nothing to do).
-    public let script: String
-    /// Certificate to trust, if not trusted yet. Must be done as the user (macOS shows its own prompt);
-    /// trust changes made from a root script are refused.
-    public let certificate: String?
-    public init(script: String, certificate: String?) { self.script = script; self.certificate = certificate }
+public struct ProjectRequest: Codable, Sendable {
+    public var name: String
+    /// Services the project uses, e.g. ["postgres", "rustfs", "mailpit"].
+    public var services: [String]
+    /// Named ports to reserve; the first gets `<name>.localhost`, others `<port>.<name>.localhost`. Default ["web"].
+    public var ports: [String]?
+    public init(name: String, services: [String], ports: [String]? = nil) {
+        self.name = name; self.services = services; self.ports = ports
+    }
+}
+
+public struct ProjectView: Codable, Sendable, Hashable, Identifiable {
+    public let name: String
+    public let services: [String]
+    public let ports: [String: Int]
+    /// Hostname per port name, e.g. ["web": "acme.localhost", "api": "api.acme.localhost"].
+    public let hosts: [String: String]
+    /// Ready-to-paste .env contents.
+    public let env: String
+    public var id: String { name }
+    public init(name: String, services: [String], ports: [String: Int], hosts: [String: String], env: String) {
+        self.name = name; self.services = services; self.ports = ports; self.hosts = hosts; self.env = env
+    }
 }

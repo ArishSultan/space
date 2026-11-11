@@ -1,0 +1,72 @@
+id: langfuse
+name: Langfuse
+icon: waveform.path.ecg
+logo: langfuse.png
+color: "#E11312"
+# LLM observability. A stack: reuses the shared Postgres, Redis and RustFS, and runs its own
+# ClickHouse and worker (hidden parts, started and stopped together with this one).
+image: langfuse/langfuse:latest
+ports:
+  - { name: web, container: 3000, host: 3333 }
+dependsOn: [postgres, redis, rustfs]
+parts: [clickhouse, langfuse-worker]
+prepare:
+  - { service: postgres, action: create_project, params: { name: langfuse } }
+  - { service: rustfs, action: create_bucket, params: { name: langfuse } }
+env:
+  HOSTNAME: "0.0.0.0"
+  NODE_OPTIONS: --max-old-space-size=1536
+  DATABASE_URL: postgresql://langfuse:langfuse@{gateway}:5432/langfuse
+  SALT: space-local-dev-salt
+  ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+  TELEMETRY_ENABLED: "false"
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+  CLICKHOUSE_URL: http://{gateway}:8123
+  CLICKHOUSE_MIGRATION_URL: clickhouse://{gateway}:9010
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: clickhouse
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  REDIS_HOST: "{gateway}"
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ""
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: spaceadmin
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: spaceadmin
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://{gateway}:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: spaceadmin
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: spaceadmin
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  NEXTAUTH_URL: http://localhost:3333
+  NEXTAUTH_SECRET: space-local-dev-secret
+  # Ready-to-use org, project, API keys and login — no sign-up needed locally.
+  LANGFUSE_INIT_ORG_ID: space
+  LANGFUSE_INIT_ORG_NAME: Space
+  LANGFUSE_INIT_PROJECT_ID: space
+  LANGFUSE_INIT_PROJECT_NAME: Local
+  LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-space
+  LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-space
+  LANGFUSE_INIT_USER_EMAIL: dev@space.test
+  LANGFUSE_INIT_USER_NAME: Space Dev
+  LANGFUSE_INIT_USER_PASSWORD: spacespace
+memory: 2G
+cpus: 2
+health:
+  exec: ["http://localhost:{port.web}/api/public/health"]
+adminURL: http://localhost:{port.web}
+connection:
+  host: http://localhost:{port.web}
+  public_key: pk-lf-space
+  secret_key: sk-lf-space
+  login: dev@space.test / spacespace
+projectEnv:
+  LANGFUSE_HOST: http://localhost:{port.web}
+  LANGFUSE_BASE_URL: http://localhost:{port.web}
+  LANGFUSE_PUBLIC_KEY: pk-lf-space
+  LANGFUSE_SECRET_KEY: sk-lf-space

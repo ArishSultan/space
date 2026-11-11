@@ -19,7 +19,7 @@ public struct SpaceState: Codable, Sendable, Equatable {
         public init(remote: Int, local: Int) { self.remote = remote; self.local = local }
     }
 
-    /// A local hostname: `<name>.space.test` → localhost:`port`.
+    /// A local hostname: `<name>.localhost` → localhost:`port`.
     public struct Site: Codable, Sendable, Hashable, Identifiable {
         /// Label(s) before the domain, e.g. "acme" or "api.acme".
         public var name: String
@@ -28,8 +28,25 @@ public struct SpaceState: Codable, Sendable, Equatable {
         public init(name: String, port: Int) { self.name = name; self.port = port }
     }
 
+    /// A project: named ports (with hostnames), and resources in the services it uses.
+    public struct Project: Codable, Sendable, Hashable, Identifiable {
+        public var name: String
+        public var services: [String]
+        /// e.g. ["web": 3100, "api": 3101]
+        public var ports: [String: Int]
+        public var id: String { name }
+        public init(name: String, services: [String], ports: [String: Int]) {
+            self.name = name; self.services = services; self.ports = ports
+        }
+    }
+
     public var tailnetEnabled = false
     public var sites: [Site] = []
+    public var projects: [Project] = []
+    /// Site name shared publicly through Tailscale Funnel (one at a time).
+    public var funnel: String?
+    /// Per-service image overrides, e.g. ["postgres": "pgautoupgrade/pgautoupgrade:17-alpine"].
+    public var images: [String: String] = [:]
     public var shared: Set<String> = []
     public var mounts: [Mount] = []
 
@@ -41,6 +58,9 @@ public struct SpaceState: Codable, Sendable, Equatable {
         shared = try c.decodeIfPresent(Set<String>.self, forKey: .shared) ?? []
         mounts = try c.decodeIfPresent([Mount].self, forKey: .mounts) ?? []
         sites = try c.decodeIfPresent([Site].self, forKey: .sites) ?? []
+        projects = try c.decodeIfPresent([Project].self, forKey: .projects) ?? []
+        funnel = try c.decodeIfPresent(String.self, forKey: .funnel)
+        images = try c.decodeIfPresent([String: String].self, forKey: .images) ?? [:]
     }
 
     public static var url: URL { SpacePaths.root.appending(path: "state.json") }

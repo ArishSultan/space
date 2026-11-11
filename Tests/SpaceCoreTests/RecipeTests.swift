@@ -61,7 +61,7 @@ import Testing
 @Suite struct CatalogTests {
     @Test func allBuiltinRecipesDecodeWithLogos() throws {
         let store = try RecipeStore(userDirectory: nil)
-        #expect(Set(store.recipes.keys) == ["postgres", "mailpit", "redis", "rustfs", "mongodb"])
+        #expect(Set(store.recipes.keys) == ["postgres", "mailpit", "redis", "rustfs", "mongodb", "clickhouse", "langfuse", "langfuse-worker"])
         for id in store.recipes.keys { #expect(store.logoURL(id) != nil, "missing logo for \(id)") }
     }
 
@@ -88,5 +88,36 @@ import Testing
            4: 0000000000000000FFFF00000340A8C0:1538 0000000000000000FFFF00000740A8C0:C350 01 00000000:00000000
         """
         #expect(ServiceManager.establishedPeers(procNetTCP: proc, ports: [5432]) == ["192.168.64.1", "192.168.64.7"])
+    }
+}
+
+@Suite struct StackAndHTTPTests {
+    @Test func langfuseStackShape() throws {
+        let store = try RecipeStore(userDirectory: nil)
+        let lf = try #require(store["langfuse"])
+        #expect(lf.dependsOn == ["postgres", "redis", "rustfs"])
+        #expect(lf.parts == ["clickhouse", "langfuse-worker"])
+        #expect(store["clickhouse"]?.hidden == true)
+        #expect(lf.expand(lf.env!["DATABASE_URL"]!, gateway: "10.0.0.1") == "postgresql://langfuse:langfuse@10.0.0.1:5432/langfuse")
+        // Published on loopback only (containers use spaced's gateway relay).
+        let args = ServiceManager.runArguments(for: lf, gateway: "10.0.0.1")
+        #expect(args.contains("127.0.0.1:3333:3000"))
+        #expect(!args.contains("10.0.0.1:3333:3000"))
+        #expect(args.contains("DATABASE_URL=postgresql://langfuse:langfuse@10.0.0.1:5432/langfuse"))
+    }
+
+    @Test func mailpitTemplateExtraction() throws {
+        let mp = try #require(try RecipeStore(userDirectory: nil)["mailpit"])
+        let recent = try #require(mp.actions?["recent"])
+        let json = #"{"messages":[{"ID":"abc","Created":"2026-11-11","From":{"Address":"a@x.dev"},"To":[{"Address":"b@y.dev"}],"Subject":"Hi"}]}"#
+        #expect(recent.extracted(json) == "abc  2026-11-11  a@x.dev → b@y.dev — Hi")
+        let search = try #require(mp.actions?["search"])
+        #expect(try search.url(with: ["query": "subject:welcome mail"]).hasSuffix("query=subject:welcome%20mail&limit=25"))
+    }
+
+    @Test func textParamsArePassedAsSeparateArguments() throws {
+        let redis = try #require(try RecipeStore(userDirectory: nil)["redis"])
+        let cmd = try #require(redis.actions?["scan_keys"]).command(with: ["pattern": "user:*; rm -rf /"])
+        #expect(cmd == ["sh", "-c", #"redis-cli --scan --pattern "$0" | head -200"#, "user:*; rm -rf /"])
     }
 }

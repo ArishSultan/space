@@ -59,3 +59,11 @@ resources:
     create: create_bucket
     drop: drop_bucket
     connection: http://localhost:{port.s3}/{name}
+projectResource: buckets
+projectEnv:
+  S3_ENDPOINT: http://localhost:{port.s3}
+  S3_BUCKET: "{name}"
+  S3_REGION: us-east-1
+  S3_ACCESS_KEY_ID: spaceadmin
+  S3_SECRET_ACCESS_KEY: spaceadmin
+  S3_FORCE_PATH_STYLE: "true"

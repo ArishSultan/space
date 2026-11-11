@@ -73,6 +73,44 @@ public struct ContainerCLI: Sendable {
         return try JSONDecoder().decode([Stats].self, from: Data(out.utf8))
     }
 
+    /// The default network's gateway: the host as seen from containers.
+    public func gateway() async -> String? {
+        struct Net: Decodable { struct Status: Decodable { let ipv4Gateway: String? }; let id: String; let status: Status? }
+        guard let out = try? await checked(["network", "ls", "--format", "json"]),
+              let nets = try? JSONDecoder().decode([Net].self, from: Data(out.utf8)) else { return nil }
+        return nets.first { $0.id == "default" }?.status?.ipv4Gateway
+    }
+
+    public struct ImageInfo: Decodable, Sendable {
+        public let name: String
+        public let id: String
+        private struct Raw: Decodable {
+            struct Configuration: Decodable { let name: String }
+            let configuration: Configuration
+            let id: String
+        }
+        public init(from decoder: any Decoder) throws {
+            let raw = try Raw(from: decoder)
+            name = raw.configuration.name
+            id = raw.id
+        }
+    }
+
+    public func images() async throws -> [ImageInfo] {
+        try JSONDecoder().decode([ImageInfo].self, from: Data(try await checked(["image", "ls", "--format", "json"]).utf8))
+    }
+
+    public func deleteImages(_ refs: [String]) async throws {
+        guard !refs.isEmpty else { return }
+        _ = try await checked(["image", "delete", "--force"] + refs)
+    }
+
+    public func pruneDanglingImages() async throws { _ = try await checked(["image", "prune"]) }
+
+    public func deleteVolume(_ name: String) async throws { _ = try await checked(["volume", "delete", name]) }
+
+    public func diskUsageJSON() async throws -> Data { Data(try await checked(["system", "df", "--format", "json"]).utf8) }
+
     public func run(_ args: [String]) async throws { _ = try await checked(["run", "--detach", "--progress", "none"] + args) }
     public func start(_ id: String) async throws { _ = try await checked(["start", id]) }
     public func stop(_ id: String) async throws { _ = try await checked(["stop", id]) }

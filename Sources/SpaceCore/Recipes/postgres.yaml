@@ -22,6 +22,10 @@ connection:
   url: postgres://space:space@localhost:{port.pg}/postgres
 clients: list_clients
 actions:
+  backup:
+    description: Dump all databases into the data volume (kept in space-backups/)
+    hidden: true
+    exec: [sh, -c, 'mkdir -p /var/lib/postgresql/data/space-backups && f=/var/lib/postgresql/data/space-backups/$(date +%Y%m%d-%H%M%S).sql.gz && pg_dumpall -U space | gzip > $f && echo $f']
   list_clients:
     description: Connected clients (excludes Space's own local-socket queries)
     exec: [psql, -U, space, -d, postgres, -At, -c,
@@ -91,3 +95,7 @@ resources:
     drop: drop_user
     protected: [space]
     connection: postgres://{name}:{name}@localhost:{port.pg}/postgres
+beforeUpdate: [backup]
+projectResource: projects
+projectEnv:
+  DATABASE_URL: postgres://{name}:{name}@localhost:{port.pg}/{name}

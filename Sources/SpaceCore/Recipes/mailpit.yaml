@@ -21,3 +21,26 @@ adminURL: http://localhost:{port.http}
 connection:
   smtp: smtp://localhost:{port.smtp}
   api: http://localhost:{port.http}/api/v1
+actions:
+  recent:
+    description: Latest 25 messages
+    http: { url: "http://localhost:{port.http}/api/v1/messages?limit=25" }
+    extract: "messages[].{ID}  {Created}  {From.Address} → {To} — {Subject}"
+  search:
+    description: Search messages (Mailpit search syntax, e.g. to:user@x.com subject:welcome)
+    params: [query]
+    text: [query]
+    http: { url: "http://localhost:{port.http}/api/v1/search?query={query}&limit=25" }
+    extract: "messages[].{ID}  {Created}  {From.Address} → {To} — {Subject}"
+  message:
+    description: One message as JSON (headers, text and HTML body)
+    hidden: true
+    params: [id]
+    http: { url: "http://localhost:{port.http}/api/v1/message/{id}" }
+  clear:
+    description: Delete all messages
+    http: { method: DELETE, url: "http://localhost:{port.http}/api/v1/messages" }
+projectEnv:
+  SMTP_HOST: localhost
+  SMTP_PORT: "{port.smtp}"
+  SMTP_URL: smtp://localhost:{port.smtp}

@@ -203,6 +203,8 @@ struct SitesSection: View {
 
     var body: some View {
         if let hosts = model.hosts {
+            let userSites = hosts.sites.filter { !$0.service }
+            let serviceSites = hosts.sites.filter(\.service)
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Label("Sites", systemImage: "globe")
@@ -218,26 +220,32 @@ struct SitesSection: View {
                 }
                 .padding(.horizontal, 8)
 
-                if !hosts.ready {
-                    HStack(spacing: 8) {
+                if !hosts.routerRunning {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                        Text("Finish setup so *.\(hosts.domain) works").font(.caption)
-                        Spacer()
-                        Button(model.settingUpHosts ? "Setting up…" : "Set up") { model.setUpHosts() }
-                            .buttonStyle(.glassProminent)
-                            .controlSize(.small)
-                            .disabled(model.settingUpHosts || !hosts.caddyInstalled || !hosts.dnsmasqInstalled)
+                        Text(hosts.routerError ?? "The *.\(hosts.domain) router isn't running")
+                            .font(.caption)
+                            .lineLimit(2)
                     }
                     .padding(.horizontal, 8)
                 }
 
-                if hosts.sites.isEmpty {
+                if userSites.isEmpty {
                     Text("Give a local app a name like acme.\(hosts.domain).")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 8)
                 }
-                ForEach(hosts.sites) { SiteTile(site: $0) }
+                ForEach(userSites) { SiteTile(site: $0) }
+
+                if !serviceSites.isEmpty {
+                    Text("Services")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 8)
+                        .padding(.top, 4)
+                    ForEach(serviceSites) { SiteTile(site: $0) }
+                }
             }
         }
     }
@@ -250,7 +258,7 @@ struct SiteTile: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "globe")
+            Image(systemName: site.service ? "shippingbox" : "globe")
                 .font(.system(size: 18))
                 .foregroundStyle(site.up ? Color.accentColor : .secondary)
                 .frame(width: 30)
@@ -263,18 +271,18 @@ struct SiteTile: View {
             Spacer(minLength: 6)
             GlassEffectContainer(spacing: 4) {
                 HStack(spacing: 4) {
-                    Button { if let u = URL(string: site.urls[0]) { openURL(u) } } label: {
+                    Button { if let u = URL(string: site.url) { openURL(u) } } label: {
                         Image(systemName: "safari").glassCircle()
                     }
                     .buttonStyle(.plain)
-                    .help("Open \(site.urls[0])")
+                    .help("Open \(site.url)")
 
                     Menu {
-                        ForEach(site.urls, id: \.self) { u in
-                            Button("Copy \(u)", systemImage: "doc.on.doc") { model.copy(u) }
+                        Button("Copy \(site.url)", systemImage: "doc.on.doc") { model.copy(site.url) }
+                        if !site.service {
+                            Divider()
+                            Button("Remove", systemImage: "trash", role: .destructive) { model.removeSite(site.name) }
                         }
-                        Divider()
-                        Button("Remove", systemImage: "trash", role: .destructive) { model.removeSite(site.name) }
                     } label: { Image(systemName: "ellipsis").glassCircle() }
                         .menuStyle(.button)
                         .buttonStyle(.plain)
@@ -298,8 +306,9 @@ struct AddSiteForm: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("New hostname").font(.headline)
             HStack(spacing: 4) {
-                TextField("acme", text: $name).textFieldStyle(.roundedBorder).frame(width: 140)
-                Text(".\(model.hosts?.domain ?? "space.test")").foregroundStyle(.secondary)
+                Text("http://").foregroundStyle(.secondary)
+                TextField("acme", text: $name).textFieldStyle(.roundedBorder).frame(width: 110)
+                Text(".\(model.hosts?.domain ?? "localhost")").foregroundStyle(.secondary)
             }
             HStack(spacing: 4) {
                 Text("→ localhost:").foregroundStyle(.secondary)
@@ -318,7 +327,7 @@ struct AddSiteForm: View {
             }
         }
         .padding(14)
-        .frame(width: 260)
+        .frame(width: 280)
     }
 }
 

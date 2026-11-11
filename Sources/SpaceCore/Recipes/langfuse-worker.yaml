@@ -1,0 +1,42 @@
+id: langfuse-worker
+name: Langfuse Worker
+icon: gearshape.2.fill
+logo: langfuse.png
+color: "#E11312"
+hidden: true
+image: langfuse/langfuse-worker:latest
+ports:
+  - { name: worker, container: 3030, host: 3031 }
+env:
+  HOSTNAME: "0.0.0.0"
+  NODE_OPTIONS: --max-old-space-size=1536
+  DATABASE_URL: postgresql://langfuse:langfuse@{gateway}:5432/langfuse
+  SALT: space-local-dev-salt
+  ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+  TELEMETRY_ENABLED: "false"
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+  CLICKHOUSE_URL: http://{gateway}:8123
+  CLICKHOUSE_MIGRATION_URL: clickhouse://{gateway}:9010
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: clickhouse
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  REDIS_HOST: "{gateway}"
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ""
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: spaceadmin
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: spaceadmin
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://{gateway}:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: spaceadmin
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: spaceadmin
+  # Media URLs are opened by your browser, so this one points at localhost.
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+memory: 2G
+cpus: 2

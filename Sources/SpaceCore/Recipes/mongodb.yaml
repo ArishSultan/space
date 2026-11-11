@@ -19,6 +19,13 @@ health:
 connection:
   url: mongodb://space:space@localhost:{port.mongo}/?authSource=admin
 actions:
+  backup:
+    description: Pin the feature compatibility version and dump everything into the data volume
+    hidden: true
+    exec: [sh, -c, 'mongosh -u space -p space --authenticationDatabase admin --quiet --eval "const v = db.version().split(\".\").slice(0, 2).join(\".\"); db.adminCommand({setFeatureCompatibilityVersion: v, confirm: true})" >/dev/null && mkdir -p /data/db/space-backups && f=/data/db/space-backups/$(date +%Y%m%d-%H%M%S).archive.gz && mongodump -u space -p space --authenticationDatabase admin --gzip --archive=$f --quiet && echo $f']
+  restore_latest_backup:
+    description: Restore the newest backup (replaces current data)
+    exec: [sh, -c, 'f=$(ls -1t /data/db/space-backups/*.archive.gz | head -1) && mongorestore -u space -p space --authenticationDatabase admin --gzip --archive=$f --drop --quiet && echo restored $f']
   create_project:
     description: Create a project (database + user with the same name, password = name)
     params: [name]
@@ -64,3 +71,7 @@ resources:
     drop: drop_db
     protected: [admin, config, local]
     connection: mongodb://space:space@localhost:{port.mongo}/{name}?authSource=admin
+beforeUpdate: [backup]
+projectResource: projects
+projectEnv:
+  MONGODB_URI: mongodb://{name}:{name}@localhost:{port.mongo}/{name}

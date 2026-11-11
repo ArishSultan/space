@@ -1,0 +1,26 @@
+id: clickhouse
+name: ClickHouse
+icon: tablecells.fill
+logo: clickhouse.png
+color: "#FAFF69"
+# Part of the Langfuse stack (analytics store); hidden from the main list.
+hidden: true
+image: clickhouse/clickhouse-server:latest
+ports:
+  - { name: http, container: 8123, host: 8123 }
+  - { name: native, container: 9000, host: 9010 }
+volumes:
+  - { name: data, path: /var/lib/clickhouse }
+  - { name: logs, path: /var/log/clickhouse-server }
+env:
+  CLICKHOUSE_DB: default
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: clickhouse
+  CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+args: [--ulimit, "nofile=262144:262144"]
+memory: 2G
+cpus: 2
+health:
+  exec: [clickhouse-client, --user, clickhouse, --password, clickhouse, --query, "SELECT 1"]
+connection:
+  http: http://clickhouse:clickhouse@localhost:{port.http}

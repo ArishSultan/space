@@ -26,7 +26,6 @@ final class AppModel {
     var peerServices: [String: [RemoteService]] = [:]
     var mounts: [MountView] = []
     var hosts: HostsStatus?
-    var settingUpHosts = false
     /// Service ids (or "peer/service") with an operation in flight.
     var busy: Set<String> = []
     var lastError: String?
@@ -210,29 +209,6 @@ final class AppModel {
 
     func removeSite(_ name: String) {
         perform("site:\(name)") { [api] in _ = try await api.delete("hosts/sites/\(name)", as: HostsStatus.self) }
-    }
-
-    /// Runs the one-time admin setup (resolver file + trusting the local certificate).
-    func setUpHosts() {
-        settingUpHosts = true
-        Task {
-            defer { settingUpHosts = false }
-            do {
-                let s: SetupScript = try await api.get("hosts/setup")
-                if !s.script.isEmpty {
-                    let r = try await AdminRunner.run(s.script)
-                    if !r.ok {
-                        if !r.stderr.contains("User canceled") { lastError = "Hostname setup failed: \(r.stderr)" }
-                        return
-                    }
-                }
-                if let cert = s.certificate {
-                    let r = try await CertificateTrust.trust(cert)
-                    if !r.ok { lastError = "Couldn't trust the HTTPS certificate: \(r.stderr)" }
-                }
-            } catch { lastError = error.localizedDescription }
-            await refresh()
-        }
     }
 
     // MARK: Tailnet

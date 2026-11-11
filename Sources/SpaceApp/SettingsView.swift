@@ -15,18 +15,17 @@ struct SettingsView: View {
                 LabeledContent("Data & definitions", value: SpacePaths.root.path)
                 Button("Show in Finder") { openURL(SpacePaths.root) }
             }
-            Section("Local hostnames (*.space.test)") {
+            Section("Local hostnames (http://*.localhost)") {
                 if let h = model.hosts {
-                    LabeledContent("Caddy (proxy)", value: h.caddyInstalled ? (h.proxyRunning ? "Running" : "Installed") : "Not installed")
-                    LabeledContent("dnsmasq (DNS)", value: h.dnsmasqInstalled ? (h.dnsRunning ? "Running" : "Installed") : "Not installed")
-                    LabeledContent("Resolver", value: h.resolverInstalled ? "Installed" : "Missing")
-                    LabeledContent("HTTPS certificate", value: h.certificateTrusted ? "Trusted" : "Not trusted")
-                    if !h.caddyInstalled || !h.dnsmasqInstalled {
-                        Text("Install with: brew install caddy dnsmasq").font(.callout.monospaced()).textSelection(.enabled)
-                    } else if !h.ready {
-                        Button(model.settingUpHosts ? "Setting up…" : "Finish setup…") { model.setUpHosts() }
-                            .disabled(model.settingUpHosts)
+                    LabeledContent("Router", value: h.routerRunning ? "Listening on port \(String(h.routerPort))" : "Not running")
+                    if let error = h.routerError {
+                        Text(error).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                     }
+                    LabeledContent("Sites", value: "\(h.sites.filter { !$0.service }.count)")
+                    LabeledContent("Service sites", value: "\(h.sites.filter(\.service).count)")
+                    Text("Browsers resolve *.localhost to this Mac on their own — no DNS, certificates or password needed.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
             }
             Section("Other Macs (Tailscale)") {

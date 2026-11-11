@@ -10,6 +10,9 @@ public actor Tailnet {
     public let stateDir: URL
     private var node: TailscaleNode?
     private var rawHandle: TailscaleHandle?
+    private var localAPI: (base: URL, key: String)?
+    private var whoisCache: [String: (login: String?, at: Date)] = [:]
+    private var ownLogin: String?
 
     public init(hostName: String = Tailnet.defaultHostName, stateDir: URL = SpacePaths.root.appending(path: "tailscale")) {
         self.hostName = hostName
@@ -42,6 +45,9 @@ public actor Tailnet {
         if let node { try? await node.close() }
         node = nil
         rawHandle = nil
+        localAPI = nil
+        ownLogin = nil
+        whoisCache = [:]
     }
 
     /// Stops the node and forgets this device's credentials.
@@ -79,7 +85,51 @@ public actor Tailnet {
         return h
     }
 
+    // MARK: Identity
+
+    /// Tailscale login (e.g. someone@gmail.com) owning the device at `ip`, via the node's LocalAPI whois.
+    public func login(ofIP ip: String) async -> String? {
+        if let c = whoisCache[ip], Date().timeIntervalSince(c.at) < 60 { return c.login }
+        guard let api = try? await localAPIEndpoint() else { return nil }
+        var comps = URLComponents(url: api.base.appending(path: "localapi/v0/whois"), resolvingAgainstBaseURL: false)!
+        comps.queryItems = [URLQueryItem(name: "addr", value: ip)]
+        var req = URLRequest(url: comps.url!)
+        req.setValue("localapi", forHTTPHeaderField: "Sec-Tailscale")
+        req.setValue("Basic " + Data(":\(api.key)".utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+        struct WhoIs: Decodable { struct Profile: Decodable { let LoginName: String? }; let UserProfile: Profile? }
+        let login = await (try? URLSession.shared.data(for: req)).flatMap { try? JSONDecoder().decode(WhoIs.self, from: $0.0) }?.UserProfile?.LoginName
+        whoisCache[ip] = (login, Date())
+        return login
+    }
+
+    /// The Tailscale login this Mac is signed in with.
+    public func myLogin() async -> String? {
+        if let ownLogin { return ownLogin }
+        guard let ip = await status().me?.ips.first else { return nil }
+        ownLogin = await login(ofIP: ip)
+        return ownLogin
+    }
+
+    private func localAPIEndpoint() async throws -> (base: URL, key: String) {
+        if let localAPI { return localAPI }
+        guard let node else { throw TailnetError.notStarted }
+        let cfg = try await node.loopback()
+        guard let url = URL(string: "http://\(cfg.address)/") else { throw TailnetError.notStarted }
+        localAPI = (url, cfg.localAPIKey)
+        return localAPI!
+    }
+
+    /// Only devices signed in with the same Tailscale account as this Mac may connect.
+    nonisolated func allowConnection(from ip: String?) -> Bool {
+        guard let ip else { return false }
+        return Blocking.run { [self] in
+            guard let mine = await self.myLogin(), let theirs = await self.login(ofIP: ip) else { return false }
+            return mine == theirs
+        }
+    }
+
     /// Listens on `port` on this node's tailnet address and forwards each connection to 127.0.0.1:`localPort`.
+    /// Connections from devices of other Tailscale accounts (e.g. shared-in nodes) are refused.
     public func forward(tailnetPort port: Int, toLocal localPort: Int) throws -> Forwarder {
         let h = try handle()
         var listener: tailscale_listener = 0
@@ -89,8 +139,13 @@ public actor Tailnet {
         Sockets.acceptLoop(fd, accept: { l in
             var conn: tailscale_conn = 0
             return tailscale_accept(l, &conn) == 0 ? conn : nil
-        }, handler: { conn in
-            guard let local = try? Sockets.connect(port: localPort) else { close(conn); return }
+        }, handler: { [self] conn in
+            var buf = [CChar](repeating: 0, count: 64)
+            let ip: String? = tailscale_getremoteaddr(fd, conn, &buf, buf.count) == 0
+                ? String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self).split(separator: ":").dropLast().joined(separator: ":")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                : nil
+            guard allowConnection(from: ip), let local = try? Sockets.connect(port: localPort) else { close(conn); return }
             Sockets.relay(conn, local)
         })
         return Forwarder(fd: fd, description: "tailnet:\(port) → localhost:\(localPort)")
@@ -165,4 +220,17 @@ struct TailnetLog: LogSink {
         return fd >= 0 ? fd : nil
     }()
     func log(_ message: String) {}
+}
+
+/// Bridges async work into the blocking connection threads.
+enum Blocking {
+    static func run<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T {
+        let sem = DispatchSemaphore(value: 0)
+        let box = Box<T>()
+        Task { box.value = await body(); sem.signal() }
+        sem.wait()
+        return box.value!
+    }
+
+    final class Box<T>: @unchecked Sendable { var value: T? }
 }

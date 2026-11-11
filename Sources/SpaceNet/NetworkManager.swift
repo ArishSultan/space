@@ -115,6 +115,23 @@ public actor NetworkManager {
         return try JSONDecoder().decode([RemoteService].self, from: data)
     }
 
+    /// Forwards an API request to another Mac's Space daemon over the tailnet (remote control from the app).
+    public func proxy(peer: String, method: String, path: String, query: String?, body: Data?) async throws -> (Int, String, Data) {
+        guard await tailnet.status().loggedIn else { throw TailnetError.notLoggedIn }
+        let session = try await tailnet.urlSession()
+        var urlString = "http://\(peer):\(apiPort)/api/\(path)"
+        if let query, !query.isEmpty { urlString += "?\(query)" }
+        guard let url = URL(string: urlString) else { throw RemoteError.badResponse(peer) }
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.httpBody = body
+        req.timeoutInterval = 120
+        if body != nil { req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        let (data, resp) = try await session.data(for: req)
+        let http = resp as? HTTPURLResponse
+        return (http?.statusCode ?? 502, http?.value(forHTTPHeaderField: "Content-Type") ?? "application/json", data)
+    }
+
     // MARK: Mounts
 
     public func mounts() -> [MountView] {

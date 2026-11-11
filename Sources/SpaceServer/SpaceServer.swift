@@ -29,18 +29,27 @@ public enum SpaceServer {
         let services = try ServiceManager.live()
         let net = NetworkManager(services: services, apiPort: port)
         await net.bootstrap()
+        let gatewayRelay = GatewayRelay(services: services)
+        await gatewayRelay.start()
         let hosts = Hostnames()
         try? await hosts.start()
+        // Built-in services with a web UI get a hostname too, e.g. mailpit.localhost → 8025.
+        await hosts.setServiceSites(await services.recipes.compactMap { r in
+            guard r.hidden != true, let admin = r.adminURL, let port = URL(string: r.expand(admin))?.port else { return nil }
+            return SpaceState.Site(name: r.id, port: port)
+        })
 
         let router = Router()
         router.add(middleware: ErrorMiddleware())
         routes(router, services: services, net: net, hosts: hosts)
+        try await moreRoutes(router, services: services, net: net,
+                             projects: Projects(services: services, hosts: hosts), apiPort: port)
 
         let app = Application(
             router: router,
             configuration: .init(address: .hostname("127.0.0.1", port: port), serverName: "spaced")
         )
-        // Stop Caddy/dnsmasq when spaced shuts down (launchd sends SIGTERM).
+        // Stop the hostname router when spaced shuts down (launchd sends SIGTERM).
         try await app.runService(gracefulShutdownSignals: [.sigterm, .sigint])
         await hosts.stop()
     }
@@ -62,7 +71,7 @@ public enum SpaceServer {
             return Reply(status.map {
                 ServiceView(id: $0.id, name: $0.name, image: $0.image, state: $0.state.rawValue, healthy: health[$0.id],
                             shared: shared.contains($0.id), ports: $0.ports, connection: $0.connection, adminURL: $0.adminURL,
-                            icon: $0.icon, color: $0.color)
+                            icon: $0.icon, color: $0.color, hidden: $0.hidden)
             })
         }
         api.get("services/:id/logo") { _, ctx -> Response in
@@ -97,7 +106,7 @@ public enum SpaceServer {
         }
         api.get("stats") { _, _ in Reply(try await services.stats()) }
 
-        // Local hostnames (*.space.test)
+        // Local hostnames (http://*.localhost)
         api.get("hosts") { _, _ in Reply(await hosts.status()) }
         api.post("hosts/sites") { req, ctx in
             let site = try await req.decode(as: SiteRequest.self, context: ctx)
@@ -107,11 +116,6 @@ public enum SpaceServer {
         api.delete("hosts/sites/:name") { _, ctx in
             try await hosts.removeSite(ctx.parameters.require("name"))
             return Reply(await hosts.status())
-        }
-        api.get("hosts/setup") { _, _ in
-            try? await hosts.start()
-            await hosts.waitForCertificateAuthority()
-            return Reply(await hosts.setup())
         }
         api.post("hosts/restart") { _, _ in
             await hosts.stop()
