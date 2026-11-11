@@ -1,0 +1,66 @@
+id: mongodb
+name: MongoDB
+icon: leaf.fill
+logo: mongodb.png
+color: "#00ED64"
+image: mongo:latest
+ports:
+  - { name: mongo, container: 27017, host: 27017 }
+volumes:
+  - { name: data, path: /data/db }
+env:
+  MONGO_INITDB_ROOT_USERNAME: space
+  MONGO_INITDB_ROOT_PASSWORD: space
+memory: 1G
+cpus: 2
+health:
+  # Authenticated ping: during first start the image runs a temporary server before the admin user exists.
+  exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval, "db.adminCommand('ping').ok"]
+connection:
+  url: mongodb://space:space@localhost:{port.mongo}/?authSource=admin
+actions:
+  create_project:
+    description: Create a project (database + user with the same name, password = name)
+    params: [name]
+    exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval,
+           'const d = db.getSiblingDB("{name}"); d.createUser({user: "{name}", pwd: "{name}", roles: [{role: "dbOwner", db: "{name}"}]}); d.getCollection("_space").insertOne({createdAt: new Date()}); print("created")']
+  drop_project:
+    description: Delete a project's database and user
+    params: [name]
+    exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval,
+           'const d = db.getSiblingDB("{name}"); try { d.dropUser("{name}") } catch (e) {}; d.dropDatabase(); print("dropped")']
+  list_projects:
+    description: List projects (users named after their own database)
+    exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval,
+           'db.getSiblingDB("admin").system.users.find({$expr: {$eq: ["$user", "$db"]}}).forEach(u => print(u.user))']
+  create_db:
+    description: Create a database
+    params: [name]
+    exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval,
+           'db.getSiblingDB("{name}").getCollection("_space").insertOne({createdAt: new Date()}); print("created")']
+  drop_db:
+    description: Drop a database
+    params: [name]
+    exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval,
+           'db.getSiblingDB("{name}").dropDatabase(); print("dropped")']
+  list_dbs:
+    description: List databases
+    exec: [mongosh, -u, space, -p, space, --authenticationDatabase, admin, --quiet, --eval,
+           'db.adminCommand({listDatabases: 1}).databases.forEach(d => print(d.name))']
+resources:
+  - id: projects
+    kind: project
+    title: Projects
+    hint: A database and a user with the same name (password = name).
+    list: list_projects
+    create: create_project
+    drop: drop_project
+    connection: mongodb://{name}:{name}@localhost:{port.mongo}/{name}
+  - id: databases
+    kind: database
+    title: Databases
+    list: list_dbs
+    create: create_db
+    drop: drop_db
+    protected: [admin, config, local]
+    connection: mongodb://space:space@localhost:{port.mongo}/{name}?authSource=admin

@@ -1,0 +1,93 @@
+id: postgres
+name: PostgreSQL
+icon: cylinder.split.1x2.fill
+logo: postgres.png
+color: "#336791"
+# pgautoupgrade tracks the latest Postgres and upgrades old data directories in place.
+image: pgautoupgrade/pgautoupgrade:latest
+ports:
+  - { name: pg, container: 5432, host: 5432 }
+volumes:
+  - { name: data, path: /var/lib/postgresql/data }
+env:
+  POSTGRES_USER: space
+  POSTGRES_PASSWORD: space
+  # Subdirectory: volumes are ext4 images with lost+found at the root.
+  PGDATA: /var/lib/postgresql/data/pgdata
+memory: 1G
+cpus: 2
+health:
+  exec: [pg_isready, -U, space]
+connection:
+  url: postgres://space:space@localhost:{port.pg}/postgres
+clients: list_clients
+actions:
+  list_clients:
+    description: Connected clients (excludes Space's own local-socket queries)
+    exec: [psql, -U, space, -d, postgres, -At, -c,
+           "SELECT coalesce(nullif(application_name, ''), 'client') || ' — ' || usename || '@' || datname || ' from ' || host(client_addr) FROM pg_stat_activity WHERE backend_type = 'client backend' AND client_addr IS NOT NULL AND pid <> pg_backend_pid() ORDER BY 1"]
+  # Projects: a login role + a database it owns, both named after the project (password = name; local dev only).
+  create_project:
+    description: Create a project (user + database with the same name)
+    params: [name]
+    exec: [psql, -U, space, -d, postgres, -v, ON_ERROR_STOP=1,
+           -c, "CREATE ROLE \"{name}\" LOGIN CREATEDB PASSWORD '{name}'",
+           -c, 'CREATE DATABASE "{name}" OWNER "{name}"']
+  drop_project:
+    description: Delete a project's database and user
+    params: [name]
+    exec: [psql, -U, space, -d, postgres, -v, ON_ERROR_STOP=1,
+           -c, 'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)',
+           -c, 'DROP ROLE IF EXISTS "{name}"']
+  list_projects:
+    description: List projects (databases owned by a role with the same name)
+    exec: [psql, -U, space, -d, postgres, -At, -c,
+           "SELECT d.datname FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE r.rolname = d.datname AND r.rolname <> 'space' ORDER BY 1"]
+  create_db:
+    description: Create a database (owned by the default user)
+    params: [name]
+    exec: [psql, -U, space, -d, postgres, -v, ON_ERROR_STOP=1, -c, 'CREATE DATABASE "{name}"']
+  drop_db:
+    description: Drop a database
+    params: [name]
+    exec: [psql, -U, space, -d, postgres, -v, ON_ERROR_STOP=1, -c, 'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)']
+  list_dbs:
+    description: List databases
+    exec: [psql, -U, space, -d, postgres, -At, -c, 'SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1']
+  create_user:
+    description: Create a login user (password = name)
+    params: [name]
+    exec: [psql, -U, space, -d, postgres, -v, ON_ERROR_STOP=1, -c, "CREATE ROLE \"{name}\" LOGIN CREATEDB PASSWORD '{name}'"]
+  drop_user:
+    description: Drop a user
+    params: [name]
+    exec: [psql, -U, space, -d, postgres, -v, ON_ERROR_STOP=1, -c, 'DROP ROLE IF EXISTS "{name}"']
+  list_users:
+    description: List login users
+    exec: [psql, -U, space, -d, postgres, -At, -c, "SELECT rolname FROM pg_roles WHERE rolcanlogin AND rolname NOT LIKE 'pg\\_%' ORDER BY 1"]
+resources:
+  - id: projects
+    kind: project
+    title: Projects
+    hint: A user and a database with the same name — the quickest way to start a new app.
+    list: list_projects
+    create: create_project
+    drop: drop_project
+    connection: postgres://{name}:{name}@localhost:{port.pg}/{name}
+  - id: databases
+    kind: database
+    title: Databases
+    list: list_dbs
+    create: create_db
+    drop: drop_db
+    protected: [postgres, space]
+    connection: postgres://space:space@localhost:{port.pg}/{name}
+  - id: users
+    kind: user
+    title: Users
+    hint: Password is the same as the user name.
+    list: list_users
+    create: create_user
+    drop: drop_user
+    protected: [space]
+    connection: postgres://{name}:{name}@localhost:{port.pg}/postgres

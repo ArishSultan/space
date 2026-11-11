@@ -1,0 +1,27 @@
+id: redis
+name: Redis
+icon: bolt.fill
+logo: redis.png
+color: "#DC382D"
+image: redis:latest
+ports:
+  - { name: redis, container: 6379, host: 6379 }
+volumes:
+  - { name: data, path: /data }
+memory: 512M
+cpus: 1
+health:
+  exec: [redis-cli, ping]
+connection:
+  url: redis://localhost:{port.redis}
+clients: list_clients
+actions:
+  list_clients:
+    description: Connected clients (excludes the listing connection itself)
+    exec: [sh, -c, "redis-cli CLIENT LIST | grep -v 'cmd=client|list' | sed -E 's/.*addr=([^ ]+).* name=([^ ]*).* db=([0-9]+).*/\\2 db\\3 from \\1/; s/^ /client /'"]
+  flush_all:
+    description: Delete all keys in all databases
+    exec: [redis-cli, FLUSHALL]
+  info:
+    description: Server info
+    exec: [redis-cli, INFO, server]

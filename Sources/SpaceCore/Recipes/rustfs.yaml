@@ -1,0 +1,61 @@
+id: rustfs
+name: RustFS
+icon: externaldrive.fill
+logo: rustfs.png
+color: "#1F6BFF"
+# S3-compatible object storage.
+image: rustfs/rustfs:latest
+ports:
+  - { name: s3, container: 9000, host: 9000 }
+  - { name: console, container: 9001, host: 9001 }
+volumes:
+  - { name: data, path: /data }
+env:
+  RUSTFS_ACCESS_KEY: spaceadmin
+  RUSTFS_SECRET_KEY: spaceadmin
+  RUSTFS_VOLUMES: /data
+  RUSTFS_ADDRESS: ":9000"
+  RUSTFS_CONSOLE_ENABLE: "true"
+  RUSTFS_CONSOLE_ADDRESS: ":9001"
+# The image's own user can't write to a freshly created (root-owned) volume.
+user: "0"
+memory: 512M
+cpus: 1
+adminURL: http://localhost:{port.console}/rustfs/console/
+connection:
+  endpoint: http://localhost:{port.s3}
+  access_key: spaceadmin
+  secret_key: spaceadmin
+  region: us-east-1
+# The RustFS image has no CLI, so bucket actions run Amazon's aws-cli in a throwaway container.
+actions:
+  create_bucket:
+    description: Create a bucket
+    params: [name]
+    image: amazon/aws-cli:latest
+    env: &aws
+      AWS_ACCESS_KEY_ID: spaceadmin
+      AWS_SECRET_ACCESS_KEY: spaceadmin
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://{address}:9000
+    exec: [s3api, create-bucket, --bucket, "{name}"]
+  drop_bucket:
+    description: Delete a bucket and everything in it
+    params: [name]
+    image: amazon/aws-cli:latest
+    env: *aws
+    exec: [s3, rb, "s3://{name}", --force]
+  list_buckets:
+    description: List buckets
+    image: amazon/aws-cli:latest
+    env: *aws
+    exec: [s3api, list-buckets, --query, "Buckets[].Name", --output, text]
+resources:
+  - id: buckets
+    kind: bucket
+    title: Buckets
+    hint: "Use endpoint http://localhost:9000 with access key / secret key spaceadmin. Bucket names: lowercase letters, digits and hyphens."
+    list: list_buckets
+    create: create_bucket
+    drop: drop_bucket
+    connection: http://localhost:{port.s3}/{name}

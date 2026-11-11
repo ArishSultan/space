@@ -1,0 +1,23 @@
+id: mailpit
+name: Mailpit
+icon: envelope.fill
+logo: mailpit.png
+color: "#0EA5A4"
+image: axllent/mailpit:latest
+ports:
+  - { name: smtp, container: 1025, host: 1025 }
+  - { name: http, container: 8025, host: 8025 }
+volumes:
+  - { name: data, path: /data }
+env:
+  MP_DATABASE: /data/mailpit.db
+  MP_SMTP_AUTH_ACCEPT_ANY: "true"
+  MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+memory: 256M
+cpus: 1
+health:
+  exec: [/mailpit, readyz]
+adminURL: http://localhost:{port.http}
+connection:
+  smtp: smtp://localhost:{port.smtp}
+  api: http://localhost:{port.http}/api/v1
