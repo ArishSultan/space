@@ -58,7 +58,8 @@ struct ProjectDelete: AsyncParsableCommand {
     @Argument var name: String
     @Flag(help: "Also delete its databases/users/buckets") var dropData = false
     func run() async throws {
-        let _: OKReply = try await Daemon().call("DELETE", "projects/\(name)?dropData=\(dropData)")
+        do { _ = try await SpaceAPI().raw("DELETE", "projects/\(name)", query: ["dropData": dropData ? "true" : "false"]) }
+        catch let SpaceAPI.Failure.server(msg) { throw ValidationError(msg) }
         print("Removed \(name)")
     }
 }

@@ -14,8 +14,33 @@ struct StatSample: Identifiable, Hashable {
 /// App-wide state, refreshed from the local spaced API.
 @MainActor @Observable
 final class AppModel {
-    let api = SpaceAPI()
+    /// This Mac's daemon (tailnet, hostnames, projects, mounts always live here).
+    let local = SpaceAPI()
     let launcher = DaemonLauncher()
+
+    /// Which Mac's services the panel shows: nil = this Mac, else a peer name (via the tailnet proxy).
+    var host: String? {
+        didSet {
+            guard host != oldValue else { return }
+            services = []; stats = [:]; history = [:]; resourceTitles = [:]
+            Task { await refresh() }
+        }
+    }
+    var api: SpaceAPI { host.map { SpaceAPI.remote(peer: $0) } ?? local }
+    var isRemote: Bool { host != nil }
+
+    /// Apps the user hid from the main panel (Settings → Apps), kept in UserDefaults.
+    var hiddenInPanel: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "hiddenInPanel") ?? []) {
+        didSet { UserDefaults.standard.set(Array(hiddenInPanel).sorted(), forKey: "hiddenInPanel") }
+    }
+    /// Services shown in the panel: not stack parts and not hidden by the user.
+    var panelServices: [ServiceView] { services.filter { $0.hidden != true && !hiddenInPanel.contains($0.id) } }
+
+    var projects: [ProjectView] = []
+    var images: [ImageSetting] = []
+    var disk: DiskUsage?
+    var maintenanceBusy: String?
+    var panelWindowOpen = false
 
     var daemonUp = true
     var services: [ServiceView] = []
@@ -47,6 +72,8 @@ final class AppModel {
             await self?.ensureDaemon()
             while !Task.isCancelled {
                 await self?.refresh()
+                // The daemon went away (e.g. replaced by an update while shutting down): bring it back.
+                if self?.daemonUp == false { await self?.ensureDaemon() }
                 let fast = (self?.visibleSurfaces ?? 0) > 0
                 try? await Task.sleep(for: .seconds(fast ? 2 : 10))
             }
@@ -57,17 +84,20 @@ final class AppModel {
 
     func refresh() async {
         do {
+            let api = self.api, local = self.local
             async let s: [ServiceView] = api.get("services")
             async let st: [ServiceStats] = api.get("stats")
-            async let n: TailnetStatus = api.get("net")
-            async let m: [MountView] = api.get("mounts")
-            async let h: HostsStatus = api.get("hosts")
-            let (svc, stat, net, mnt, hst) = try await (s, st, n, m, h)
+            async let n: TailnetStatus = local.get("net")
+            async let m: [MountView] = local.get("mounts")
+            async let h: HostsStatus = local.get("hosts")
+            async let p: [ProjectView] = local.get("projects")
+            let (svc, stat, net, mnt, hst, prj) = try await (s, st, n, m, h, p)
             hosts = hst
+            projects = prj
             services = svc
             for s in svc where resourceTitles[s.id] == nil {
                 if let r: RecipeView = try? await api.get("services/\(s.id)/recipe") {
-                    resourceTitles[s.id] = (r.recipe.resources ?? []).map(\.title)
+                    resourceTitles[s.id] = (r.recipe.resources ?? []).map(\.title) + (r.recipe.visibleActions.isEmpty ? [] : ["Actions"])
                 }
             }
             tailnet = net
@@ -97,24 +127,24 @@ final class AppModel {
 
     func refreshPeers() async {
         lastPeerRefresh = Date()
-        guard let list: [TailnetStatus.Device] = try? await api.get("net/peers") else { return }
+        guard let list: [TailnetStatus.Device] = try? await local.get("net/peers") else { return }
         peers = list
         for p in list where p.online {
-            peerServices[p.name] = try? await api.get("net/peers/\(p.name)/services")
+            peerServices[p.name] = try? await local.get("net/peers/\(p.name)/services")
         }
     }
 
     // MARK: Daemon
 
     func ensureDaemon() async {
-        if await api.isUp() { daemonUp = true; return }
+        if await local.isUp() { daemonUp = true; return }
         do {
             try await launcher.start()
             if !(await waitForDaemon()) {
                 try await launcher.retry()
                 _ = await waitForDaemon()
             }
-            daemonUp = await api.isUp()
+            daemonUp = await local.isUp()
         } catch {
             daemonUp = false
             lastError = error.localizedDescription
@@ -123,7 +153,7 @@ final class AppModel {
 
     private func waitForDaemon(seconds: Int = 8) async -> Bool {
         for _ in 0..<(seconds * 4) {
-            if await api.isUp() { return true }
+            if await local.isUp() { return true }
             try? await Task.sleep(for: .milliseconds(250))
         }
         return false
@@ -181,9 +211,9 @@ final class AppModel {
     }
 
     func mount(_ peer: String, _ service: String, _ on: Bool) {
-        perform("\(peer)/\(service)") { [api] in
-            if on { _ = try await api.post("mounts", body: MountRequest(peer: peer, service: service), as: MountView.self) }
-            else { _ = try await api.delete("mounts/\(peer)/\(service)", as: OK.self) }
+        perform("\(peer)/\(service)") { [local] in
+            if on { _ = try await local.post("mounts", body: MountRequest(peer: peer, service: service), as: MountView.self) }
+            else { _ = try await local.delete("mounts/\(peer)/\(service)", as: OK.self) }
         }
     }
 
@@ -204,11 +234,11 @@ final class AppModel {
     // MARK: Local hostnames
 
     func addSite(name: String, port: Int) {
-        perform("site:\(name)") { [api] in _ = try await api.post("hosts/sites", body: SiteRequest(name: name, port: port), as: HostsStatus.self) }
+        perform("site:\(name)") { [local] in _ = try await local.post("hosts/sites", body: SiteRequest(name: name, port: port), as: HostsStatus.self) }
     }
 
     func removeSite(_ name: String) {
-        perform("site:\(name)") { [api] in _ = try await api.delete("hosts/sites/\(name)", as: HostsStatus.self) }
+        perform("site:\(name)") { [local] in _ = try await local.delete("hosts/sites/\(name)", as: HostsStatus.self) }
     }
 
     // MARK: Tailnet
@@ -218,11 +248,11 @@ final class AppModel {
         Task {
             defer { loggingIn = false }
             do {
-                var s: TailnetStatus = try await api.post("net/login")
+                var s: TailnetStatus = try await local.post("net/login")
                 if let url = s.authURL.flatMap(URL.init(string:)), !s.loggedIn { open(url) }
                 for _ in 0..<300 where !s.loggedIn {
                     try await Task.sleep(for: .seconds(1))
-                    s = try await api.get("net")
+                    s = try await local.get("net")
                 }
                 tailnet = s
                 await refreshPeers()
@@ -231,7 +261,61 @@ final class AppModel {
     }
 
     func logout() {
-        perform("tailnet") { [api] in try await api.post("net/logout", as: OK.self) }
+        perform("tailnet") { [local] in try await local.post("net/logout", as: OK.self) }
+    }
+
+    // MARK: Projects
+
+    func createProject(name: String, services: [String], ports: [String]) async -> ProjectView? {
+        busy.insert("project")
+        defer { busy.remove("project") }
+        do {
+            let p: ProjectView = try await local.post("projects", body: ProjectRequest(name: name, services: services, ports: ports))
+            await refresh()
+            return p
+        } catch { lastError = error.localizedDescription; return nil }
+    }
+
+    func deleteProject(_ name: String, dropData: Bool) {
+        perform("project:\(name)") { [local] in
+            _ = try await local.raw("DELETE", "projects/\(name)", query: ["dropData": dropData ? "true" : "false"])
+        }
+    }
+
+    // MARK: Apps & storage (Settings)
+
+    func loadMaintenance() async {
+        images = (try? await api.get("images")) ?? []
+        disk = try? await api.get("system/disk")
+    }
+
+    func setImage(_ id: String, _ image: String?) {
+        perform("image:\(id)") { [api] in _ = try await api.post("images/\(id)", body: ImageOverrideRequest(image: image), as: [ImageSetting].self) }
+        Task { try? await Task.sleep(for: .milliseconds(300)); await loadMaintenance() }
+    }
+
+    func updateAll() {
+        maintenanceBusy = "Updating all apps…"
+        Task {
+            defer { maintenanceBusy = nil }
+            do {
+                let r: UpdateResult = try await api.post("system/update-all")
+                if !r.failed.isEmpty { lastError = r.failed.map { "\($0.key): \($0.value)" }.joined(separator: "\n") }
+            } catch { lastError = error.localizedDescription }
+            await refresh(); await loadMaintenance()
+        }
+    }
+
+    var lastReclaim: ReclaimResult?
+
+    func reclaim(includeData: Bool) {
+        maintenanceBusy = "Reclaiming space…"
+        Task {
+            defer { maintenanceBusy = nil }
+            do { lastReclaim = try await api.post("system/reclaim", body: ReclaimRequest(includeData: includeData)) }
+            catch { lastError = error.localizedDescription }
+            await refresh(); await loadMaintenance()
+        }
     }
 
     // MARK: Helpers
@@ -240,7 +324,7 @@ final class AppModel {
         (resourceTitles[id] ?? []).joined(separator: ", ").lowercased().capitalizedFirst
     }
 
-    var runningCount: Int { services.filter(\.isRunning).count }
+    var runningCount: Int { services.filter { $0.isRunning && $0.hidden != true }.count }
     var totalMemory: Double { stats.values.reduce(0) { $0 + Double($1.memoryBytes ?? 0) } }
     var totalCPU: Double { stats.values.reduce(0) { $0 + ($1.cpuPercent ?? 0) } }
 

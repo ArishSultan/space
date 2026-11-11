@@ -5,26 +5,56 @@ import SwiftUI
 struct PopoverView: View {
     @Environment(AppModel.self) private var model
     @State private var showUsage = false
+    @State private var contentHeight: CGFloat = 300
+    @State private var moreBelow = false
+
+    /// Tallest the scrolling part may get before it scrolls (header stays fixed above it).
+    static let maxContentHeight: CGFloat = 600
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
 
-            if !model.daemonUp {
-                DaemonDownCard()
-            } else {
-                VStack(spacing: 2) {
-                    ForEach(model.services) { ServiceTile(service: $0) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if !model.daemonUp {
+                        DaemonDownCard()
+                    } else {
+                        VStack(spacing: 2) {
+                            ForEach(model.panelServices) { ServiceTile(service: $0) }
+                        }
+
+                        if !model.isRemote {
+                            ProjectsSection()
+                            SitesSection()
+                        }
+
+                        if model.runningCount > 0 {
+                            UsagePanel(expanded: $showUsage)
+                        }
+
+                        if model.tailnet.loggedIn, !model.peers.isEmpty, !model.isRemote {
+                            PeersSection()
+                        }
+                    }
                 }
-
-                SitesSection()
-
-                if model.runningCount > 0 {
-                    UsagePanel(expanded: $showUsage)
-                }
-
-                if model.tailnet.loggedIn, !model.peers.isEmpty {
-                    PeersSection()
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
+            }
+            // Hug the content, but never taller than the max — beyond that it scrolls with a visible bar.
+            .frame(height: min(max(contentHeight, 1), Self.maxContentHeight))
+            .scrollIndicators(contentHeight > Self.maxContentHeight ? .visible : .hidden)
+            .scrollIndicatorsFlash(onAppear: true)
+            .scrollBounceBehavior(.basedOnSize)
+            .onScrollGeometryChange(for: Bool.self) { g in
+                g.contentOffset.y + g.containerSize.height < g.contentSize.height - 4
+            } action: { _, more in moreBelow = more }
+            .overlay(alignment: .bottom) {
+                // Soft fade hinting there's more to scroll to.
+                if moreBelow {
+                    Rectangle().fill(.background)
+                        .mask(LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .top, endPoint: .bottom))
+                        .frame(height: 28)
+                        .allowsHitTesting(false)
                 }
             }
 
@@ -44,9 +74,13 @@ struct PopoverView: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 0) {
                 Text("Space").font(.headline)
-                Text(model.daemonUp ? "\(model.runningCount) of \(model.services.count) running" : "Service offline")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if model.peers.contains(where: \.online) || model.isRemote {
+                    HostPicker()
+                } else {
+                    Text(model.daemonUp ? "\(model.runningCount) of \(model.panelServices.count) running" : "Service offline")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
             GlassEffectContainer(spacing: 6) {
@@ -60,6 +94,38 @@ struct PopoverView: View {
             }
         }
         .padding(.horizontal, 4)
+    }
+}
+
+/// Switches the panel between this Mac and other Macs running Space.
+struct HostPicker: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Menu {
+            Button { model.host = nil } label: {
+                Label("This Mac", systemImage: model.host == nil ? "checkmark" : "laptopcomputer")
+            }
+            Divider()
+            ForEach(model.peers.filter(\.online), id: \.name) { peer in
+                Button { model.host = peer.name } label: {
+                    Label(peer.name.replacingOccurrences(of: "space-", with: ""),
+                          systemImage: model.host == peer.name ? "checkmark" : "desktopcomputer")
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(model.host.map { $0.replacingOccurrences(of: "space-", with: "") } ?? "This Mac")
+                Text("· \(model.runningCount) running").foregroundStyle(.secondary)
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+            }
+            .font(.caption)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Choose which Mac's services to control")
     }
 }
 
@@ -192,6 +258,161 @@ struct ServiceTile: View {
         Divider()
         Button("Restart", systemImage: "arrow.clockwise") { model.restart(service.id) }.disabled(!service.isRunning)
         Button("Update to latest image", systemImage: "arrow.down.circle") { model.pullLatest(service.id) }
+    }
+}
+
+// MARK: - Projects
+
+struct ProjectsSection: View {
+    @Environment(AppModel.self) private var model
+    @State private var creating = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label("Projects", systemImage: "folder")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button { creating = true } label: { Image(systemName: "plus").glassCircle(size: 22) }
+                    .buttonStyle(.plain)
+                    .help("New project: ports, a .localhost hostname, and a database/bucket per service")
+                    .popover(isPresented: $creating, arrowEdge: .trailing) { NewProjectForm { creating = false } }
+            }
+            .padding(.horizontal, 8)
+            if model.projects.isEmpty {
+                Text("A project bundles ports, a hostname and databases, with one .env to copy.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 8)
+            }
+            ForEach(model.projects) { ProjectTile(project: $0) }
+        }
+    }
+}
+
+struct ProjectTile: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openURL) private var openURL
+    let project: ProjectView
+    @State private var copied = false
+    @State private var confirmDelete = false
+
+    private var primaryHost: String? {
+        project.ports.min { $0.value < $1.value }.flatMap { project.hosts[$0.key] }
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(.tint)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(project.name).font(.callout.weight(.semibold))
+                Text(project.ports.sorted { $0.value < $1.value }.map { "\($0.key) :\(String($0.value))" }.joined(separator: " · "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 6)
+            GlassEffectContainer(spacing: 4) {
+                HStack(spacing: 4) {
+                    Button {
+                        model.copy(project.env)
+                        copied = true
+                        Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.clipboard").glassCircle()
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy .env")
+
+                    Menu {
+                        if let host = primaryHost, let url = URL(string: "http://\(host)") {
+                            Button("Open http://\(host)", systemImage: "safari") { openURL(url) }
+                        }
+                        Button("Copy .env", systemImage: "doc.on.clipboard") { model.copy(project.env) }
+                        Divider()
+                        Button("Remove project (keep data)", systemImage: "minus.circle") { model.deleteProject(project.name, dropData: false) }
+                        Button("Delete project and its data…", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                    } label: { Image(systemName: "ellipsis").glassCircle() }
+                        .menuStyle(.button)
+                        .buttonStyle(.plain)
+                        .menuIndicator(.hidden)
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .alert("Delete \(project.name) and its data?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) { model.deleteProject(project.name, dropData: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Its databases, users and buckets in \(project.services.joined(separator: ", ")) are removed.")
+        }
+    }
+}
+
+struct NewProjectForm: View {
+    @Environment(AppModel.self) private var model
+    let done: () -> Void
+    @State private var name = ""
+    @State private var selected: Set<String> = ["postgres"]
+    @State private var ports = "web"
+    @State private var created: ProjectView?
+
+    /// Services that contribute something to a project.
+    private var choices: [ServiceView] {
+        model.services.filter { $0.hidden != true }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let created {
+                Label("\(created.name) is ready", systemImage: "checkmark.circle.fill").font(.headline).foregroundStyle(.green)
+                ScrollView {
+                    Text(created.env).font(.caption.monospaced()).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: 180)
+                HStack {
+                    Spacer()
+                    Button("Copy .env") { model.copy(created.env); done() }.buttonStyle(.glassProminent)
+                }
+            } else {
+                Text("New project").font(.headline)
+                TextField("Name, e.g. acme", text: $name).textFieldStyle(.roundedBorder)
+                Text("Services").font(.caption).foregroundStyle(.secondary)
+                ForEach(choices) { s in
+                    Toggle(isOn: Binding(get: { selected.contains(s.id) },
+                                         set: { if $0 { selected.insert(s.id) } else { selected.remove(s.id) } })) {
+                        HStack(spacing: 6) { ServiceIcon(service: s, size: 16); Text(s.name) }
+                    }
+                    .toggleStyle(.checkbox)
+                }
+                TextField("Ports (comma separated)", text: $ports).textFieldStyle(.roundedBorder)
+                Text("The first port gets http://\(name.isEmpty ? "name" : name.lowercased()).localhost, others <port>.<name>.localhost.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    if model.busy.contains("project") { ProgressView().controlSize(.small); Text("Creating…").font(.caption) }
+                    Spacer()
+                    Button("Cancel", action: done)
+                    Button("Create") {
+                        Task {
+                            created = await model.createProject(
+                                name: name.lowercased(), services: choices.map(\.id).filter(selected.contains),
+                                ports: ports.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+                        }
+                    }
+                    .buttonStyle(.glassProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.count < 3 || model.busy.contains("project"))
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 300)
     }
 }
 

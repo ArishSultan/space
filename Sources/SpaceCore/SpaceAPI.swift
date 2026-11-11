@@ -12,6 +12,16 @@ public struct SpaceAPI: Sendable {
         self.session = session
     }
 
+    /// Talks to another Mac's Space through the local daemon's tailnet proxy.
+    public static func remote(peer: String, port: Int = SpaceAPI.defaultPort) -> SpaceAPI {
+        SpaceAPI(base: URL(string: "http://127.0.0.1:\(port)/api/peers/\(peer)/proxy/")!)
+    }
+
+    public init(base: URL, session: URLSession = .shared) {
+        self.base = base
+        self.session = session
+    }
+
     public enum Failure: Error, LocalizedError, CustomStringConvertible {
         case daemonNotRunning
         case server(String)

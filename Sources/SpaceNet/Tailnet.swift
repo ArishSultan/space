@@ -87,6 +87,16 @@ public actor Tailnet {
 
     // MARK: Identity
 
+    /// "100.1.2.3:4567" / "[fd7a::1]:4567" / "100.1.2.3" / "fd7a::1" → the address without a port.
+    static func hostPart(_ addr: String) -> String? {
+        let a = addr.trimmingCharacters(in: .whitespaces)
+        if a.isEmpty { return nil }
+        if a.hasPrefix("["), let end = a.firstIndex(of: "]") { return String(a[a.index(after: a.startIndex)..<end]) }
+        let colons = a.filter { $0 == ":" }.count
+        if colons == 1 { return String(a.split(separator: ":")[0]) }
+        return a
+    }
+
     /// Tailscale login (e.g. someone@gmail.com) owning the device at `ip`, via the node's LocalAPI whois.
     public func login(ofIP ip: String) async -> String? {
         if let c = whoisCache[ip], Date().timeIntervalSince(c.at) < 60 { return c.login }
@@ -97,7 +107,16 @@ public actor Tailnet {
         req.setValue("localapi", forHTTPHeaderField: "Sec-Tailscale")
         req.setValue("Basic " + Data(":\(api.key)".utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
         struct WhoIs: Decodable { struct Profile: Decodable { let LoginName: String? }; let UserProfile: Profile? }
-        let login = await (try? URLSession.shared.data(for: req)).flatMap { try? JSONDecoder().decode(WhoIs.self, from: $0.0) }?.UserProfile?.LoginName
+        var login: String?
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            login = (try? JSONDecoder().decode(WhoIs.self, from: data))?.UserProfile?.LoginName
+            if login == nil {
+                FileHandle.standardError.write(Data("tailnet: whois \(ip) → HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0): \(String(decoding: data.prefix(300), as: UTF8.self))\n".utf8))
+            }
+        } catch {
+            FileHandle.standardError.write(Data("tailnet: whois \(ip) failed: \(error)\n".utf8))
+        }
         whoisCache[ip] = (login, Date())
         return login
     }
@@ -123,8 +142,10 @@ public actor Tailnet {
     nonisolated func allowConnection(from ip: String?) -> Bool {
         guard let ip else { return false }
         return Blocking.run { [self] in
-            guard let mine = await self.myLogin(), let theirs = await self.login(ofIP: ip) else { return false }
-            return mine == theirs
+            let mine = await self.myLogin(), theirs = await self.login(ofIP: ip)
+            let ok = mine != nil && mine == theirs
+            if !ok { FileHandle.standardError.write(Data("tailnet: refused connection from \(ip) (\(theirs ?? "unknown account"))\n".utf8)) }
+            return ok
         }
     }
 
@@ -142,8 +163,7 @@ public actor Tailnet {
         }, handler: { [self] conn in
             var buf = [CChar](repeating: 0, count: 64)
             let ip: String? = tailscale_getremoteaddr(fd, conn, &buf, buf.count) == 0
-                ? String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self).split(separator: ":").dropLast().joined(separator: ":")
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                ? Self.hostPart(String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
                 : nil
             guard allowConnection(from: ip), let local = try? Sockets.connect(port: localPort) else { close(conn); return }
             Sockets.relay(conn, local)

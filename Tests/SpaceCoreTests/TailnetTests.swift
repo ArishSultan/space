@@ -40,3 +40,13 @@ import Testing
         #expect(out["url"] == "postgres://space:space@localhost:15000/postgres")
     }
 }
+
+@Suite struct PeerAddressTests {
+    @Test func hostPartHandlesAllForms() {
+        #expect(Tailnet.hostPart("100.70.201.48:51234") == "100.70.201.48")
+        #expect(Tailnet.hostPart("100.70.201.48") == "100.70.201.48")
+        #expect(Tailnet.hostPart("[fd7a:115c::1]:443") == "fd7a:115c::1")
+        #expect(Tailnet.hostPart("fd7a:115c::1") == "fd7a:115c::1")
+        #expect(Tailnet.hostPart("") == nil)
+    }
+}

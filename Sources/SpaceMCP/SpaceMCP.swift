@@ -285,8 +285,3 @@ public enum SpaceMCP {
         while !Task.isCancelled { try await Task.sleep(for: .seconds(3600)) }
     }
 }
-
-public struct ReclaimRequest: Codable, Sendable {
-    public var includeData: Bool
-    public init(includeData: Bool) { self.includeData = includeData }
-}

@@ -31,7 +31,10 @@ struct ServiceWindow: View {
     }
 
     private var service: ServiceView? { model.services.first { $0.id == serviceID } }
-    private var tabs: [Tab] { (recipe?.recipe.resources ?? []).isEmpty ? [.overview, .logs, .config] : Tab.allCases }
+    private var tabs: [Tab] {
+        guard let r = recipe?.recipe else { return [.overview, .logs, .config] }
+        return (r.resources ?? []).isEmpty && r.visibleActions.isEmpty ? [.overview, .logs, .config] : Tab.allCases
+    }
 
     var body: some View {
         Group {
@@ -46,7 +49,7 @@ struct ServiceWindow: View {
                         case .logs: LogsTab(serviceID: serviceID)
                         case .config: ConfigTab(serviceID: serviceID, recipe: $recipe)
                         case .manage:
-                            if let kinds = recipe?.recipe.resources, !kinds.isEmpty { ManageTab(service: service, kinds: kinds) }
+                            if let r = recipe?.recipe { ManageTab(service: service, recipe: r) }
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -190,6 +193,59 @@ struct LogsTab: View {
     @State private var follow = true
     @State private var loadError: String?
 
+    static let maxLines = 5000
+
+    private func append(_ lines: [String]) {
+        guard !lines.isEmpty else { return }
+        var all = text.isEmpty ? [] : text.components(separatedBy: "\n")
+        all.append(contentsOf: lines)
+        if all.count > Self.maxLines { all.removeFirst(all.count - Self.maxLines) }
+        text = all.joined(separator: "\n")
+    }
+
+    private func stream() async {
+        while !Task.isCancelled {
+            do {
+                text = ""
+                loadError = nil
+                let url = model.api.base.appending(path: "services/\(serviceID)/logs/stream").appending(queryItems: [.init(name: "tail", value: "1000")])
+                let (bytes, _) = try await URLSession.shared.bytes(from: url)
+                var pending: [String] = []
+                var lastFlush = ContinuousClock.now
+                for try await line in bytes.lines {
+                    guard line.hasPrefix("data: ") else { continue }
+                    pending.append(String(line.dropFirst(6)))
+                    // Batch UI updates (the initial backlog arrives all at once).
+                    if ContinuousClock.now - lastFlush > .milliseconds(150) {
+                        if !paused { append(pending) }
+                        pending.removeAll(keepingCapacity: true)
+                        lastFlush = .now
+                    }
+                }
+                if !paused { append(pending) }
+            } catch is CancellationError {
+                return
+            } catch {
+                if Task.isCancelled { return }
+                loadError = error.localizedDescription
+            }
+            try? await Task.sleep(for: .seconds(2))  // container stopped/restarted: reconnect
+        }
+    }
+
+    private func poll() async {
+        while !Task.isCancelled {
+            if !paused {
+                do {
+                    let t: String = try await model.api.get("services/\(serviceID)/logs", query: ["tail": "1000"])
+                    if t != text { text = t }
+                    loadError = nil
+                } catch { loadError = error.localizedDescription }
+            }
+            try? await Task.sleep(for: .seconds(2))
+        }
+    }
+
     private var shown: String {
         guard !filter.isEmpty else { return text }
         return text.split(separator: "\n").filter { $0.localizedCaseInsensitiveContains(filter) }.joined(separator: "\n")
@@ -228,18 +284,8 @@ struct LogsTab: View {
         }
         .padding(.top, standalone ? 12 : 0)
         .task(id: serviceID) {
-            while !Task.isCancelled {
-                if !paused {
-                    do {
-                        let t: String = try await model.api.get("services/\(serviceID)/logs", query: ["tail": "1000"])
-                        if t != text { text = t }
-                        loadError = nil
-                    } catch {
-                        loadError = error.localizedDescription
-                    }
-                }
-                try? await Task.sleep(for: .seconds(2))
-            }
+            // Live stream (server-sent events) from this Mac's daemon; other Macs are polled through the proxy.
+            if model.isRemote { await poll() } else { await stream() }
         }
     }
 }
@@ -334,16 +380,19 @@ struct ConfigTab: View {
 struct ManageTab: View {
     @Environment(AppModel.self) private var model
     let service: ServiceView
-    let kinds: [Recipe.Resources]
+    let recipe: Recipe
     @State private var selected: String = ""
 
-    private var current: Recipe.Resources? { kinds.first { $0.id == selected } ?? kinds.first }
+    private var kinds: [Recipe.Resources] { recipe.resources ?? [] }
+    private var segments: [(id: String, title: String)] {
+        kinds.map { ($0.id, $0.title) } + (recipe.visibleActions.isEmpty ? [] : [("__actions", "Actions")])
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if kinds.count > 1 {
+            if segments.count > 1 {
                 Picker("", selection: $selected) {
-                    ForEach(kinds) { Text($0.title).tag($0.id) }
+                    ForEach(segments, id: \.id) { Text($0.title).tag($0.id) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -351,14 +400,96 @@ struct ManageTab: View {
             }
             if !service.isRunning {
                 ContentUnavailableView("\(service.name) is stopped", systemImage: "moon.zzz",
-                                       description: Text("Start it to manage \(current?.title.lowercased() ?? "items")."))
-            } else if let current {
+                                       description: Text("Start it to manage it."))
+            } else if selected == "__actions" {
+                ActionsPanel(service: service, actions: recipe.visibleActions)
+            } else if let current = kinds.first(where: { $0.id == selected }) {
                 ResourceList(service: service, resources: current)
                     .id(current.id)
             }
         }
         .padding(18)
-        .onAppear { if selected.isEmpty { selected = kinds.first?.id ?? "" } }
+        .onAppear { if selected.isEmpty { selected = segments.first?.id ?? "" } }
+    }
+}
+
+extension Recipe {
+    /// Actions worth a button: not internal, and not already covered by a resource list or the clients check.
+    var visibleActions: [(name: String, action: Action)] {
+        let used = Set((resources ?? []).flatMap { [$0.list, $0.create, $0.drop].compactMap { $0 } } + [clients].compactMap { $0 })
+        return (actions ?? [:]).filter { $0.value.hidden != true && !used.contains($0.key) }
+            .sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+    }
+}
+
+/// Runs a service's actions (e.g. Mailpit: recent/search/clear, Redis: keyspace/scan/flush).
+struct ActionsPanel: View {
+    @Environment(AppModel.self) private var model
+    let service: ServiceView
+    let actions: [(name: String, action: Recipe.Action)]
+    @State private var values: [String: String] = [:]
+    @State private var output = ""
+    @State private var running: String?
+    @State private var confirm: String?
+
+    private static func isDestructive(_ name: String) -> Bool {
+        ["clear", "flush", "drop", "delete", "restore"].contains { name.contains($0) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(actions, id: \.name) { item in
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.name.replacingOccurrences(of: "_", with: " ").capitalized).font(.callout.weight(.semibold))
+                        Text(item.action.description).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    ForEach(item.action.params ?? [], id: \.self) { p in
+                        TextField(p, text: Binding(get: { values["\(item.name).\(p)"] ?? "" },
+                                                   set: { values["\(item.name).\(p)"] = $0 }))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 180)
+                            .onSubmit { run(item.name) }
+                    }
+                    Button(running == item.name ? "Running…" : "Run") {
+                        if Self.isDestructive(item.name) { confirm = item.name } else { run(item.name) }
+                    }
+                    .buttonStyle(.glass)
+                    .tint(Self.isDestructive(item.name) ? .red : nil)
+                    .disabled(running != nil)
+                }
+                .padding(.vertical, 2)
+            }
+            if !output.isEmpty {
+                ScrollView {
+                    Text(output).font(.caption.monospaced()).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                }
+                .background(.background.secondary, in: .rect(cornerRadius: 10))
+            } else {
+                Spacer()
+            }
+        }
+        .confirmationDialog("Run “\(confirm ?? "")” on \(service.name)? This can't be undone.",
+                            isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } })) {
+            Button("Run", role: .destructive) { if let c = confirm { run(c) } }
+        }
+    }
+
+    private func run(_ name: String) {
+        let params = Dictionary(uniqueKeysWithValues: (actions.first { $0.name == name }?.action.params ?? []).map {
+            ($0, values["\(name).\($0)"] ?? "")
+        })
+        running = name
+        Task {
+            defer { running = nil }
+            do {
+                let r: ServiceManager.ActionResult = try await model.api.post("services/\(service.id)/actions/\(name)",
+                                                                              body: ActionRequest(params: params))
+                output = r.output.isEmpty ? (r.ok ? "Done." : "Failed.") : r.output
+            } catch { output = error.localizedDescription }
+        }
     }
 }
 

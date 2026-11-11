@@ -25,6 +25,11 @@ public struct ReclaimResult: Codable, Sendable {
     public let removed: [String]
 }
 
+public struct ReclaimRequest: Codable, Sendable {
+    public var includeData: Bool
+    public init(includeData: Bool) { self.includeData = includeData }
+}
+
 public struct ImageSetting: Codable, Sendable, Hashable, Identifiable {
     public let id: String
     public let name: String
