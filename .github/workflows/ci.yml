@@ -13,16 +13,16 @@ jobs:
   build-test:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           cache: false
 
       # TailscaleKit takes minutes to build from source; it only changes with the pinned revision in the script.
       - name: Cache TailscaleKit
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: Vendor/TailscaleKit.xcframework
           key: tailscalekit-${{ runner.arch }}-${{ hashFiles('scripts/build-tailscalekit.sh') }}

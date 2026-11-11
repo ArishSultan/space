@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Packages build/Space.app (from scripts/bundle-app.sh) into build/Space-<version>.zip, optionally notarizes it,
-# and writes the signed Sparkle appcast build/appcast.xml.
+# Packages build/Space.app (from scripts/bundle-app.sh) into build/Space-<version>.zip (what the updater downloads) and
+# build/Space-<version>.dmg (what people install from), optionally notarizes them, and writes the signed Sparkle
+# appcast build/appcast.xml.
 #
 # Environment:
 #   VERSION, BUILD         same values the app was built with (required)
 #   REPO                   GitHub "owner/name" the release is published to (required)
 #   SPARKLE_PRIVATE_KEY    EdDSA private key (contents of the exported key file). Without it the key named
 #                          SPARKLE_ACCOUNT (default space-app) is read from the login keychain.
+#   SIGN_IDENTITY          Developer ID identity, also used to sign the dmg (optional)
 #   NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_PASSWORD   optional: notarize + staple (needs a Developer ID build)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,19 +17,39 @@ cd "$ROOT"
 : "${VERSION:?}" "${BUILD:?}" "${REPO:?}"
 APP="build/Space.app"
 ZIP="build/Space-$VERSION.zip"
+DMG="build/Space-$VERSION.dmg"
 TAG="v$VERSION"
 TOOLS="$(find .build/artifacts -type d -path '*sparkle/Sparkle/bin' | head -1)"
 [ -x "$TOOLS/sign_update" ] || { echo "Sparkle tools not found; run 'swift package resolve' first" >&2; exit 1; }
 
-ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
-
-if [ -n "${NOTARY_APPLE_ID:-}" ]; then
-  echo "Notarizing…"
-  xcrun notarytool submit "$ZIP" --apple-id "$NOTARY_APPLE_ID" --team-id "${NOTARY_TEAM_ID:?}" \
+notarize() {
+  xcrun notarytool submit "$1" --apple-id "$NOTARY_APPLE_ID" --team-id "${NOTARY_TEAM_ID:?}" \
     --password "${NOTARY_PASSWORD:?}" --wait
+}
+
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+if [ -n "${NOTARY_APPLE_ID:-}" ]; then
+  echo "Notarizing the app…"
+  notarize "$ZIP"
   xcrun stapler staple "$APP"
   rm -f "$ZIP"
-  ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+  ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"   # re-zip with the stapled ticket
+fi
+
+# Disk image: the app next to an Applications shortcut.
+STAGE="$(mktemp -d)"
+cp -R "$APP" "$STAGE/Space.app"
+ln -s /Applications "$STAGE/Applications"
+rm -f "$DMG"
+hdiutil create -volname "Space" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+rm -rf "$STAGE"
+if [ -n "${SIGN_IDENTITY:-}" ] && [ "$SIGN_IDENTITY" != "-" ]; then
+  codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
+fi
+if [ -n "${NOTARY_APPLE_ID:-}" ]; then
+  echo "Notarizing the disk image…"
+  notarize "$DMG"
+  xcrun stapler staple "$DMG"
 fi
 
 if [ -n "${SPARKLE_PRIVATE_KEY:-}" ]; then
@@ -55,4 +77,4 @@ cat > build/appcast.xml <<XML
   </channel>
 </rss>
 XML
-echo "Packaged $ZIP and build/appcast.xml"
+echo "Packaged $ZIP, $DMG and build/appcast.xml"

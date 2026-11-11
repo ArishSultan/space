@@ -41,8 +41,8 @@ After a rebuild, open the app again and it reloads the background service.
 
 ## Install and update
 
-Download `Space-<version>.zip` from the latest [release](../../releases/latest), unzip it, and drag **Space.app** into
-`/Applications`. Updates then arrive by themselves: Space checks every few hours, installs new versions in the
+Download `Space-<version>.dmg` from the latest [release](../../releases/latest), open it and drag **Space.app** into
+`Applications`. Updates then arrive by themselves: Space checks every few hours, installs new versions in the
 background and starts them the next time it opens (Settings → General → Updates has the switches and a manual
 **Check for Updates…**). Your services keep running while it updates.
 
@@ -59,7 +59,7 @@ git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The workflow tests, builds `Space.app`, signs it, zips it, signs the update with Space's EdDSA key and publishes a
-GitHub release with `Space-0.2.0.zip` and `appcast.xml`. Installed copies read
+GitHub release with `Space-0.2.0.dmg` (for people), `Space-0.2.0.zip` (what the updater downloads) and `appcast.xml`. Installed copies read
 `releases/latest/download/appcast.xml`, so the newest release is always what they update to.
 `.github/workflows/ci.yml` builds and tests every push and pull request.
 
