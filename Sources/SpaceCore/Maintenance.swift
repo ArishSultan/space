@@ -57,7 +57,7 @@ extension ServiceManager {
         let overrides = SpaceState.load().images
         return store.all.map { r in
             ImageSetting(id: r.id, name: r.name, defaultImage: r.image, image: overrides[r.id] ?? r.image,
-                         overridden: overrides[r.id] != nil, hidden: r.hidden ?? false)
+                         overridden: overrides[r.id] != nil, hidden: (r.hidden ?? false) || r.native != nil)
         }
     }
 
@@ -73,7 +73,8 @@ extension ServiceManager {
     /// Pulls the latest image for every installed service (stack parts are handled by their parent).
     public func updateAll() async throws -> UpdateResult {
         var updated: [String] = [], failed: [String: String] = [:]
-        for s in try await status() where s.state != .notCreated && !s.hidden {
+        let native = Set(recipes.filter { $0.native != nil }.map(\.id))
+        for s in try await status() where s.state != .notCreated && !s.hidden && !native.contains(s.id) {
             do { try await pullLatest(s.id); updated.append(s.id) }
             catch { failed[s.id] = String(describing: error) }
         }
@@ -107,7 +108,7 @@ extension ServiceManager {
         var removed: [String] = []
 
         let running = Set(try await cli.list().filter(\.isRunning).map(\.id))
-        for r in recipes where !running.contains(r.containerName) {
+        for r in recipes where r.native == nil && !running.contains(r.containerName) {
             if try await cli.list().contains(where: { $0.id == r.containerName }) {
                 try await cli.delete(r.containerName)
                 removed.append("container \(r.containerName)")
@@ -121,7 +122,7 @@ extension ServiceManager {
 
         // Images Space knows about: service images (current and overridden) and helper images used by actions.
         var known = Set<String>()
-        for r in store.all + recipes {
+        for r in (store.all + recipes) where r.native == nil {
             known.insert(Self.normalize(r.image))
             for a in (r.actions ?? [:]).values { if let img = a.image { known.insert(Self.normalize(img)) } }
         }

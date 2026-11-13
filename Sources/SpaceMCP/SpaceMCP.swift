@@ -7,9 +7,10 @@ import SpaceCore
 public enum SpaceMCP {
     public static let instructions = """
     Space runs local development services (Postgres, MongoDB, Redis, Mailpit, S3 storage, Langfuse…) on this Mac \
-    in Apple containers. Use these tools to start/stop services, create databases, users, buckets and whole \
+    in Apple containers, and Ollama (local LLMs) as a native process so models use the GPU. Use these tools to start/stop services, create databases, users, buckets and whole \
     projects (an app's endpoints plus links to the databases/buckets it uses, with a ready .env), read logs and stats, inspect test emails, manage *.localhost hostnames and \
-    share services with the user's other Macs. Credentials are local-dev defaults and safe to show.
+    share services with the user's other Macs, and download/load/unload Ollama models (on this Mac or another one \
+    via `peer`). Credentials are local-dev defaults and safe to show.
     Stopping/restarting/updating a service with connected clients fails unless you pass force=true — check \
     list_clients first and tell the user who would be disconnected.
     """
@@ -38,7 +39,17 @@ public enum SpaceMCP {
         }
     }
 
-    static let service = ("service", "string", "Service id, e.g. postgres, mongodb, redis, mailpit, s3, langfuse")
+    static let service = ("service", "string", "Service id, e.g. postgres, mongodb, redis, mailpit, s3, langfuse, ollama")
+    static let peer = ("peer", "string", "Optional: run on this other Mac (name from list_peers) instead of this one")
+    static let model = ("model", "string", "Model name, e.g. llama3.2 or qwen2.5:7b")
+
+    /// This Mac's API, or another Mac's through the tailnet proxy when `peer` is given.
+    static func target(_ api: SpaceAPI, _ a: [String: Value]) -> SpaceAPI {
+        guard let p = a["peer"]?.stringValue, !p.isEmpty else { return api }
+        return SpaceAPI(base: api.base.appending(path: "peers/\(p)/proxy/"))
+    }
+
+    static func gb(_ bytes: UInt64) -> String { String(format: "%.1f GB", Double(bytes) / 1_000_000_000) }
     static let force = ("force", "boolean", "Proceed even if clients are connected (they will be disconnected)")
 
     static func str(_ a: [String: Value], _ k: String) throws -> String {
@@ -119,6 +130,9 @@ public enum SpaceMCP {
             let id = try str(a, "service"); try await guardClients(api, id, a, verb: "update_service")
             return try await post(api, "services/\(id)/pull")
         },
+        .init(name: "install_service", description: "Install a service that runs natively on the Mac (Ollama) with Homebrew, in the background; list_services shows `install.installing` and `install.source` (brew = Space can update it, app = updates itself). Fails with instructions when Homebrew is missing.", params: [service], required: ["service"]) { api, a in
+            try await post(api, "services/\(try str(a, "service"))/install")
+        },
         .init(name: "get_connection_info", description: "Connection strings, ports and web UI for a service.", params: [service], required: ["service"]) { api, a in
             let id = try str(a, "service")
             let all: [ServiceView] = try await api.get("services")
@@ -184,6 +198,41 @@ public enum SpaceMCP {
             let rv: RecipeView = try await api.get("services/\(id)/recipe")
             guard let drop = rv.recipe.resourceKind(kind)?.drop else { throw MCPError.invalidParams("\(id) can't delete \(kind)") }
             return try await action(api, id, drop, ["name": try str(a, "name")])
+        },
+
+        // Ollama
+        .init(name: "list_models", description: "Ollama models: downloaded ones with size, whether each is loaded in memory (ready) or pinned, plus downloads in progress. Models are loaded on demand by requests; load_model keeps one ready.", params: [peer], required: []) { api, a in
+            let api = target(api, a)
+            let models: [OllamaModel] = try await api.get("ollama/models")
+            let pulls: [OllamaPull] = try await api.get("ollama/pulls")
+            var out = models.isEmpty ? "No models downloaded. Use pull_model.\n" : ""
+            for m in models {
+                let state = m.loading ? "LOADING" : m.pinned ? "LOADED (pinned)" : m.loaded ? "LOADED (unloads automatically)" : "off"
+                out += "\(m.name)  \(gb(m.sizeBytes))  \([m.parameterSize, m.quantization].compactMap { $0 }.joined(separator: " "))  [\(state)]\(m.error.map { "  load failed: \($0)" } ?? "")\n"
+            }
+            for p in pulls {
+                let pct = p.fraction.map { " \(Int($0 * 100))%" } ?? ""
+                out += "downloading \(p.name):\(pct) \(p.error.map { "failed: \($0)" } ?? p.status)\n"
+            }
+            return out
+        },
+        .init(name: "pull_model", description: "Download an Ollama model in the background (can take minutes). Check progress with list_models.", params: [model, peer], required: ["model"]) { api, a in
+            try await post(target(api, a), "ollama/models/pull", OllamaNameRequest(name: try str(a, "model")))
+        },
+        .init(name: "load_model", description: "Turn a downloaded model on: load it into memory and keep it there (also after Ollama restarts) until unload_model.", params: [model, peer], required: ["model"]) { api, a in
+            try await post(target(api, a), "ollama/models/load", OllamaNameRequest(name: try str(a, "model")))
+        },
+        .init(name: "unload_model", description: "Turn a model off: free its memory. It stays downloaded and still loads on demand when a request uses it.", params: [model, peer], required: ["model"]) { api, a in
+            try await post(target(api, a), "ollama/models/unload", OllamaNameRequest(name: try str(a, "model")))
+        },
+        .init(name: "delete_model", description: "Delete a downloaded model from disk. Confirm with the user first.", params: [model, peer], required: ["model"]) { api, a in
+            pretty(try await target(api, a).raw("DELETE", "ollama/models", query: ["name": try str(a, "model")]))
+        },
+        .init(name: "get_ollama_settings", description: "Ollama server settings: max models loaded at once, idle keep-alive, parallel requests.", params: [peer], required: []) { api, a in
+            try await get(target(api, a), "ollama/settings")
+        },
+        .init(name: "set_ollama_settings", description: "Change Ollama settings (max_loaded_models 1-16, keep_alive like 5m / 1h / -1 for forever, num_parallel 1-16). Applied when Ollama restarts: tell the user, and use restart_service (check list_clients first). Omitted values are reset to Ollama's defaults.", params: [("max_loaded_models", "integer", "Models kept in memory at once"), ("keep_alive", "string", "Idle time before unloading, e.g. 5m, 1h, -1"), ("num_parallel", "integer", "Simultaneous requests per model"), peer], required: []) { api, a in
+            try await post(target(api, a), "ollama/settings", OllamaSettings(maxLoadedModels: a["max_loaded_models"]?.intValue, keepAlive: a["keep_alive"]?.stringValue, numParallel: a["num_parallel"]?.intValue))
         },
 
         // Mail (Mailpit)

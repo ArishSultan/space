@@ -73,7 +73,7 @@ public enum SpaceServer {
             return Reply(status.map {
                 ServiceView(id: $0.id, name: $0.name, image: $0.image, state: $0.state.rawValue, healthy: health[$0.id],
                             shared: shared.contains($0.id), ports: $0.ports, connection: $0.connection, adminURL: $0.adminURL,
-                            icon: $0.icon, color: $0.color, hidden: $0.hidden)
+                            icon: $0.icon, color: $0.color, hidden: $0.hidden, native: $0.native, install: $0.install)
             })
         }
         api.get("services/:id/logo") { _, ctx -> Response in
@@ -122,6 +122,8 @@ public enum SpaceServer {
         api.post("net/logout") { _, _ in try await net.logout(); return Reply(OK()) }
         api.get("net/peers") { _, _ in Reply(try await net.peers()) }
         api.get("net/peers/:peer/services") { _, ctx in Reply(try await net.remoteServices(peer: ctx.parameters.require("peer"))) }
+        api.get("services/:id/install") { _, ctx in Reply(try await services.installStatus(ctx.parameters.require("id"))) }
+        api.post("services/:id/install") { _, ctx in Reply(try await services.installNative(ctx.parameters.require("id"))) }
         api.post("services/:id/share") { _, ctx in try await net.share(ctx.parameters.require("id")); return Reply(OK()) }
         api.post("services/:id/unshare") { _, ctx in try await net.unshare(ctx.parameters.require("id")); return Reply(OK()) }
         api.get("mounts") { _, _ in Reply(await net.mounts()) }

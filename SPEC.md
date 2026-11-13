@@ -22,7 +22,7 @@ The daemon keeps services running when the app is closed. The app is a client of
 
 ## 2. Domain concepts
 
-- **Service (app):** a defined, containerised dev service. Built-in: PostgreSQL, MongoDB, Redis, Mailpit, S3 storage, Langfuse (a stack with hidden parts: Langfuse worker, ClickHouse). Always latest version, one instance each.
+- **Service (app):** a defined, containerised dev service. Built-in: PostgreSQL, MongoDB, Redis, Mailpit, S3 storage, Ollama (a native process, not a container: containers have no GPU), Langfuse (a stack with hidden parts: Langfuse worker, ClickHouse). Always latest version, one instance each.
   - Attributes: id, name, logo/icon, accent colour, image, state, health, ports, connection strings, admin web URL, shared flag, hidden flag (stack parts are never listed on their own).
   - **States:** `not_created`, `stopped`, `running`, `stopping`, `unknown`. **Health:** healthy / unhealthy / unknown (only while running and only if the service defines a check).
 - **Recipe:** YAML definition of a service (image, ports, volumes, env, resources, health check, connection templates, actions, managed resources, project .env templates, dependencies, stack parts, pre-start steps, pre-update backup). Built-ins ship with the app; users can override or add recipes in `~/.config/space/recipes/`.
@@ -136,21 +136,23 @@ A project is one app you're building. It has **endpoints** and **resource links*
 | Redis | 6379 | — | actions: keyspace, scan keys, info, flush all | Client list |
 | Mailpit | SMTP 1025, UI | `mailpit.localhost` | actions: recent, search, clear | Captures all outgoing dev mail |
 | S3 Storage (Versity S3 Gateway) | 9000 | — (no console) | buckets | Key/secret `spaceadmin`; env-only config; one folder per bucket |
+| Ollama | 11434 | — | models tab: download (progress, cancel), on/off per model, delete; server settings | Native `ollama serve` (Metal GPU); uses an already-running Ollama; **Install** = `brew install ollama` in the background (no Homebrew: link to the download page); install method detected by resolving symlinks (Homebrew Cellar → Update = `brew upgrade` + restart if running; `.app` → updates itself; other → not updatable); "on" = loaded + kept (re-loaded after restart); "off" = unloaded, still loads on demand; settings (max loaded, keep-alive, parallel) apply on restart; shareable like any service |
 | Langfuse | — | `langfuse.localhost` | — | Stack: web + worker + ClickHouse, depends on Postgres, Redis, S3 Storage; preset login & API keys |
 
 ---
 
 ## 5. Agent & CLI interfaces (feature parity)
 
-**CLI (`spaced`)**: status, start/stop, logs (-f), stats, action, project create/add-endpoint/link/unlink/env, hosts status, net login/share/mount, system disk/reclaim/update-all, mcp.
+**CLI (`spaced`)**: status, start/stop, logs (-f), stats, action, project create/add-endpoint/link/unlink/env, hosts status, net login/share/mount, ollama ls/pull/load/unload/rm/settings, system disk/reclaim/update-all, mcp.
 
-**MCP server (stdio + HTTP)** — 39 tools in these groups:
-- Services: list, start, stop, restart, update, get connection info, list clients, stats, logs, watch logs
+**MCP server (stdio + HTTP)** — 47 tools in these groups:
+- Services: list, install (native services), start, stop, restart, update, get connection info, list clients, stats, logs, watch logs
 - Contents: list/run actions, list/create/delete resources
 - Mail: recent, search, get, clear
 - Projects: list, get, create (with endpoints and resource links), add/remove endpoint, add/remove resource link (optionally creating the resource), get env, delete
 - Hostnames: list (read-only)
 - Tailnet: status, list peers, list peer services, share, unshare, use remote service, stop using remote service
+- Ollama: list models (with downloads in progress), pull, load (on), unload (off), delete, get/set settings; each takes an optional `peer`
 - Maintenance: disk usage, reclaim space, update all
 - MCP resources: last 500 log lines per service
 

@@ -197,6 +197,18 @@ final class AppModel {
 
     var confirmation: Confirmation?
 
+    /// A confirmation drawn inside the menu-bar panel. System alerts can't be used there: they open their own
+    /// window, the panel loses focus and closes, and the buttons never receive the click.
+    struct PanelAlert {
+        let title: String
+        let message: String
+        let confirm: String
+        var destructive = true
+        let action: () -> Void
+    }
+
+    var panelAlert: PanelAlert?
+
     /// Runs `action` right away unless the service has connected clients, in which case it asks first.
     func confirmIfConnected(_ id: String, verb: String, origin: String, _ action: @escaping () -> Void) {
         guard let s = services.first(where: { $0.id == id }), s.isRunning else { action(); return }
@@ -212,7 +224,13 @@ final class AppModel {
         }
     }
 
+    /// Installs a native service (Ollama) with Homebrew; it runs in the background and shows up in the service list.
+    func install(_ s: ServiceView) {
+        perform(s.id) { [api] in try await api.post("services/\(s.id)/install", as: NativeInstall.self) }
+    }
+
     func setRunning(_ s: ServiceView, _ on: Bool, origin: String = "popover") {
+        if on, let install = s.install, !install.installed { return self.install(s) }
         let op = { [self] in perform(s.id) { [api] in try await api.post("services/\(s.id)/\(on ? "start" : "stop")", as: OK.self) } }
         if on { op() } else { confirmIfConnected(s.id, verb: "Stop", origin: origin, op) }
     }

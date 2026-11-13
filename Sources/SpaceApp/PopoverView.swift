@@ -53,7 +53,7 @@ struct PopoverView: View {
         .padding(16)
         .frame(width: 420)
         .background { QuitShortcuts() }
-        .connectedClientsAlert(origin: "popover")
+        .panelAlerts()
         .onAppear { model.visibleSurfaces += 1; Task { await model.refresh(); await model.loadMaintenance() } }
         .onDisappear { model.visibleSurfaces -= 1 }
     }
@@ -244,7 +244,7 @@ struct ServiceTile: View {
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .labelsHidden()
-                .disabled(busy)
+                .disabled(busy || service.install?.installing == true)
         }
     }
 
@@ -257,7 +257,11 @@ struct ServiceTile: View {
             case .some(false): return ("Running · Starting up", .orange)
             case .none: return ("Running", .green)
             }
-        case "not_created": return ("Not created", .secondary)
+        case "not_created":
+            if let install = service.install, !install.installed {
+                return (install.installing ? "Installing…" : "Not installed", install.installing ? .orange : .secondary)
+            }
+            return ("Not created", .secondary)
         case "stopping": return ("Stopping…", .orange)
         default: return ("Stopped", .secondary)
         }
@@ -301,7 +305,9 @@ struct ServiceTile: View {
                 .disabled(busy)
         }
         Button("Restart", systemImage: "arrow.clockwise") { model.restart(service.id) }.disabled(!service.isRunning)
-        Button("Update to latest image", systemImage: "arrow.down.circle") { model.pullLatest(service.id) }
+        if service.install?.canUpdate ?? true {
+            Button(service.install == nil ? "Update to latest image" : "Update (Homebrew)", systemImage: "arrow.down.circle") { model.pullLatest(service.id) }
+        }
     }
 }
 
@@ -344,7 +350,6 @@ struct ProjectTile: View {
     let project: ProjectView
     @State private var expanded: Bool
     @State private var adding = false
-    @State private var confirmDelete = false
 
     init(project: ProjectView) {
         self.project = project
@@ -423,12 +428,6 @@ struct ProjectTile: View {
                 .padding(.leading, 19)
             }
         }
-        .alert("Delete \(project.name)?", isPresented: $confirmDelete) {
-            Button("Delete", role: .destructive) { model.deleteProject(project.name) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Its hostnames stop working. Databases, buckets and other resources it uses are kept.")
-        }
     }
 
     @ViewBuilder private var menu: some View {
@@ -446,7 +445,12 @@ struct ProjectTile: View {
             }
         }
         Divider()
-        Button("Delete project…", systemImage: "trash", role: .destructive) { confirmDelete = true }
+        Button("Delete project…", systemImage: "trash", role: .destructive) {
+            model.panelAlert = .init(
+                title: "Delete \(project.name)?",
+                message: "Its hostnames stop working. Databases, buckets and other resources it uses are kept.",
+                confirm: "Delete") { model.deleteProject(project.name) }
+        }
     }
 }
 

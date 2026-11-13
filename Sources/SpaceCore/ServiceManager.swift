@@ -13,6 +13,10 @@ public struct ServiceStatus: Codable, Sendable {
     public let icon: String?
     public let color: String?
     public let hidden: Bool
+    /// Runs as a plain process on this Mac rather than in a container.
+    public let native: Bool
+    /// For native services: how it is installed and whether an install/update is running.
+    public let install: NativeInstall?
 }
 
 public struct ServiceStats: Codable, Sendable {
@@ -35,6 +39,9 @@ public actor ServiceManager {
     public private(set) var store: RecipeStore
     private var lastCPU: [String: (usec: UInt64, at: Date)] = [:]
     private var cachedGateway: String?
+    /// Services that run as plain macOS processes (Ollama), and Ollama's downloads/loads in flight.
+    let processes = NativeProcesses()
+    let ollama = OllamaState()
 
     /// Host address as seen from containers; services are also published there so stacks can reach them.
     public func gateway() async -> String {
@@ -83,18 +90,107 @@ public actor ServiceManager {
 
     public func status() async throws -> [ServiceStatus] {
         let containers = Dictionary(try await cli.list().map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        return recipes.map { r in
+        var out: [ServiceStatus] = []
+        for r in recipes {
             let c = containers[r.containerName]
-            return ServiceStatus(
+            var state = c.map { ServiceStatus.State(rawValue: $0.state) ?? .unknown } ?? .notCreated
+            var install: NativeInstall?
+            if let native = r.native {
+                if await NativeProcesses.probe(nativeProbeURL(r)) { state = .running }
+                else { state = NativeProcesses.executable(for: native) == nil ? .notCreated : .stopped }
+                install = await nativeInstall(r, native)
+            }
+            out.append(ServiceStatus(
                 id: r.id, name: r.name, image: c?.image ?? r.image,
-                state: c.map { ServiceStatus.State(rawValue: $0.state) ?? .unknown } ?? .notCreated,
+                state: state,
                 address: c?.addresses.first.map { $0.split(separator: "/").first.map(String.init) ?? $0 },
                 ports: Dictionary(uniqueKeysWithValues: r.ports.map { ($0.name, $0.host) }),
                 connection: r.connectionInfo,
                 adminURL: r.adminURL.map { r.expand($0) },
-                icon: r.icon, color: r.color, hidden: r.hidden ?? false
-            )
+                icon: r.icon, color: r.color, hidden: r.hidden ?? false, native: r.native != nil, install: install
+            ))
         }
+        return out
+    }
+
+    // MARK: Native services (plain macOS processes)
+
+    func nativeProbeURL(_ r: Recipe) -> URL {
+        if let h = r.health?.exec.first, h.hasPrefix("http"), let url = URL(string: r.expand(h)) { return url }
+        return URL(string: "http://127.0.0.1:\(r.ports.first?.host ?? 0)/")!
+    }
+
+    func nativeInstall(_ r: Recipe, _ n: Recipe.Native) async -> NativeInstall {
+        let path = NativeProcesses.executable(for: n)
+        let job = await processes.jobState(r.id)
+        return NativeInstall(source: NativeInstall.classify(path), path: path, brewAvailable: NativeProcesses.locateBrew() != nil,
+                             formula: n.brew, downloadURL: n.download, installing: job.running, error: job.error)
+    }
+
+    public func installStatus(_ id: String) async throws -> NativeInstall {
+        let r = try recipe(id)
+        guard let n = r.native else { throw ActionError.failed("\(r.name) runs in a container; there's nothing to install.") }
+        return await nativeInstall(r, n)
+    }
+
+    /// Installs a native service with Homebrew, in the background (poll `installStatus` or the service list).
+    public func installNative(_ id: String) async throws -> NativeInstall {
+        let (r, n) = try installTarget(id)
+        if try await checkInstallable(r, n) { return await nativeInstall(r, n) }
+        guard await processes.beginJob(id) else { return await nativeInstall(r, n) }
+        Task { await self.runBrew(r, n, verb: "install", restart: false) }
+        return await nativeInstall(r, n)
+    }
+
+    /// Same, waiting until it finishes (for the CLI).
+    public func installNativeAndWait(_ id: String) async throws {
+        let (r, n) = try installTarget(id)
+        if try await checkInstallable(r, n) { return }
+        guard await processes.beginJob(id) else { throw ActionError.failed("\(r.name) is already being installed.") }
+        await runBrew(r, n, verb: "install", restart: false)
+        if let error = await processes.jobState(id).error { throw ActionError.failed(error) }
+    }
+
+    private func installTarget(_ id: String) throws -> (Recipe, Recipe.Native) {
+        let r = try recipe(id)
+        guard let n = r.native else { throw ActionError.failed("\(r.name) runs in a container; there's nothing to install.") }
+        return (r, n)
+    }
+
+    /// True when it's already installed (nothing to do); throws when it can't be installed automatically.
+    private func checkInstallable(_ r: Recipe, _ n: Recipe.Native) async throws -> Bool {
+        if NativeProcesses.executable(for: n) != nil { return true }
+        let how = n.download.map { " Install it from \($0) and Space will find it." } ?? ""
+        guard n.brew != nil else { throw ActionError.failed("\(r.name) can't be installed by Space.\(how)") }
+        guard NativeProcesses.locateBrew() != nil else {
+            throw ActionError.failed("Homebrew isn't installed, so Space can't install \(r.name) for you.\(how) (Or install Homebrew from https://brew.sh.)")
+        }
+        return false
+    }
+
+    private func runBrew(_ r: Recipe, _ n: Recipe.Native, verb: String, restart: Bool) async {
+        var error = await NativeProcesses.brew(verb, formula: n.brew ?? r.id, id: r.id)
+        if error == nil, NativeProcesses.executable(for: n) == nil { error = "Homebrew finished but \(r.name) wasn't found afterwards." }
+        await processes.finishJob(r.id, error: error)
+        if error == nil, restart { try? await self.restart(r.id) }
+    }
+
+    func nativeExecutableName(_ n: Recipe.Native) -> String {
+        URL(fileURLWithPath: n.executables.first ?? "").lastPathComponent
+    }
+
+    func nativePID(_ r: Recipe, _ n: Recipe.Native) async -> Int32? {
+        await processes.pid(id: r.id, executableName: nativeExecutableName(n), port: r.ports.first?.host ?? 0)
+    }
+
+    func startNative(_ r: Recipe, _ n: Recipe.Native) async throws {
+        // Already answering (started earlier, or by the service's own app): nothing to do.
+        if await NativeProcesses.probe(nativeProbeURL(r)) { return }
+        var env = (r.env ?? [:]).mapValues { r.expand($0) }
+        if r.id == "ollama" { env.merge(try ollamaEnvironment()) { _, new in new } }
+        try await processes.start(id: r.id, name: r.name, native: n, env: env)
+        try await waitHealthy(r.id, timeout: .seconds(30))
+        if r.id == "ollama" { await ollamaRepin() }
     }
 
     public func status(_ id: String) async throws -> ServiceStatus {
@@ -106,6 +202,7 @@ public actor ServiceManager {
 
     public func start(_ id: String) async throws {
         let r = try recipe(id)
+        if let native = r.native { return try await startNative(r, native) }
         // Shared services first, healthy before we continue.
         for dep in r.dependsOn ?? [] {
             if try await status(dep).state != .running { try await start(dep) }
@@ -139,6 +236,10 @@ public actor ServiceManager {
 
     public func stop(_ id: String) async throws {
         let r = try recipe(id)
+        if let native = r.native {
+            return try await processes.stop(id: r.id, name: r.name, executableName: nativeExecutableName(native),
+                                            probeURL: nativeProbeURL(r), port: r.ports.first?.host ?? 0)
+        }
         if try await cli.list().contains(where: { $0.id == r.containerName && $0.isRunning }) {
             try await cli.stop(r.containerName)
         }
@@ -154,6 +255,7 @@ public actor ServiceManager {
     /// Needed after config changes, since container settings are fixed at creation.
     public func recreate(_ id: String) async throws {
         let r = try recipe(id)
+        if r.native != nil { return try await restart(id) }
         if try await cli.list().contains(where: { $0.id == r.containerName }) {
             try await cli.delete(r.containerName)
         }
@@ -163,6 +265,7 @@ public actor ServiceManager {
     /// Pulls the latest image (and its stack parts'), running `beforeUpdate` actions (e.g. backups) first.
     public func pullLatest(_ id: String) async throws {
         let r = try recipe(id)
+        if let n = r.native { return try await updateNative(r, n) }
         if try await status(id).state == .running {
             for action in r.beforeUpdate ?? [] {
                 let res = try await runAction(id, action)
@@ -176,6 +279,22 @@ public actor ServiceManager {
             if try await cli.list().contains(where: { $0.id == pr.containerName }) { try await cli.delete(pr.containerName) }
         }
         try await recreate(id)
+    }
+
+    /// Updates a native service the way it was installed: Homebrew upgrades, apps update themselves.
+    func updateNative(_ r: Recipe, _ n: Recipe.Native) async throws {
+        let info = await nativeInstall(r, n)
+        switch info.source {
+        case .none: throw ActionError.failed("\(r.name) isn't installed yet — install it first.")
+        case .app: throw ActionError.failed("\(r.name) was installed as an app, which keeps itself up to date: use its menu bar icon → Check for Updates.")
+        case .other: throw ActionError.failed("\(r.name) (\(info.path ?? "")) wasn't installed with Homebrew, so Space can't update it.")
+        case .brew:
+            guard info.brewAvailable else { throw ActionError.failed("Homebrew wasn't found, so Space can't update \(r.name).") }
+            guard await processes.beginJob(r.id) else { throw ActionError.failed("\(r.name) is already being updated.") }
+            let wasRunning = await NativeProcesses.probe(nativeProbeURL(r))
+            await runBrew(r, n, verb: "upgrade", restart: wasRunning)
+            if let error = await processes.jobState(r.id).error { throw ActionError.failed(error) }
+        }
     }
 
     /// Ports are published on 127.0.0.1 only. Containers reach shared services at `{gateway}:<port>`
@@ -196,6 +315,7 @@ public actor ServiceManager {
 
     public func isHealthy(_ id: String) async throws -> Bool {
         let r = try recipe(id)
+        if r.native != nil { return await NativeProcesses.probe(nativeProbeURL(r)) }
         guard let health = r.health else { return try await status(id).state == .running }
         if health.exec.first?.hasPrefix("http") == true, let url = URL(string: r.expand(health.exec[0])) {
             // HTTP health check, run from spaced (for images without a shell).
@@ -210,7 +330,18 @@ public actor ServiceManager {
     public func stats() async throws -> [ServiceStats] {
         let now = Date()
         let byName = Dictionary(uniqueKeysWithValues: recipes.map { ($0.containerName, $0.id) })
-        return try await cli.stats().compactMap { s in
+        var native: [ServiceStats] = []
+        for r in recipes {
+            guard let n = r.native, let pid = await nativePID(r, n), let u = await NativeProcesses.usage(pid: pid) else { continue }
+            var memory = u.rss
+            // Models live in GPU memory, which `ps` doesn't count: report what Ollama says is loaded.
+            if r.id == "ollama", let client = try? ollamaClient(), let loaded = try? await client.models("/api/ps") {
+                memory = max(memory, loaded.reduce(0) { $0 + ($1.size ?? 0) })
+            }
+            native.append(ServiceStats(id: r.id, cpuPercent: u.cpu, memoryBytes: memory, memoryLimitBytes: nil, networkRxBytes: nil,
+                                       networkTxBytes: nil, blockReadBytes: nil, blockWriteBytes: nil, processes: 1, sampledAt: now))
+        }
+        return native + (try await cli.stats()).compactMap { s in
             guard let id = byName[s.id] else { return nil }
             var cpu: Double?
             if let usec = s.cpuUsageUsec {
@@ -231,11 +362,13 @@ public actor ServiceManager {
     // MARK: Logs
 
     public func logs(_ id: String, tail: Int? = 200) async throws -> String {
-        try await cli.logs(try recipe(id).containerName, tail: tail)
+        if try recipe(id).native != nil { return NativeProcesses.tailLog(id, lines: tail ?? 200) }
+        return try await cli.logs(try recipe(id).containerName, tail: tail)
     }
 
     public func followLogs(_ id: String, tail: Int = 100) throws -> AsyncThrowingStream<String, any Error> {
-        cli.followLogs(try recipe(id).containerName, tail: tail)
+        if try recipe(id).native != nil { return NativeProcesses.followLog(id, tail: tail) }
+        return cli.followLogs(try recipe(id).containerName, tail: tail)
     }
 
     // MARK: Recipes & resources
@@ -286,6 +419,11 @@ public actor ServiceManager {
     public func clients(_ id: String) async throws -> ClientsInfo {
         let r = try recipe(id)
         guard try await status(id).state == .running else { return ClientsInfo(count: 0, clients: []) }
+        if let native = r.native {
+            guard let pid = await nativePID(r, native) else { return ClientsInfo(count: 0, clients: []) }
+            let n = await NativeProcesses.connections(pid: pid, port: r.ports.first?.host ?? 0)
+            return ClientsInfo(count: n, clients: n == 0 ? [] : ["\(n) connection\(n == 1 ? "" : "s")"])
+        }
         if let action = r.clients, let res = try? await runAction(id, action), res.ok {
             let lines = res.output.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
             return ClientsInfo(count: lines.count, clients: lines)

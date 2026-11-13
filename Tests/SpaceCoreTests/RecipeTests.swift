@@ -61,7 +61,7 @@ import Testing
 @Suite struct CatalogTests {
     @Test func allBuiltinRecipesDecodeWithLogos() throws {
         let store = try RecipeStore(userDirectory: nil)
-        #expect(Set(store.recipes.keys) == ["postgres", "mailpit", "redis", "s3", "mongodb", "clickhouse", "langfuse", "langfuse-worker"])
+        #expect(Set(store.recipes.keys) == ["postgres", "mailpit", "redis", "s3", "mongodb", "clickhouse", "langfuse", "langfuse-worker", "ollama"])
         for id in store.recipes.keys { #expect(store.logoURL(id) != nil, "missing logo for \(id)") }
     }
 

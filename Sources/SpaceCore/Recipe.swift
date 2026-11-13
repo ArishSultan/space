@@ -17,6 +17,18 @@ public struct Recipe: Codable, Sendable, Identifiable, Hashable {
         public var exec: [String]
     }
 
+    /// Runs the service as a plain macOS process instead of a container, for software that needs the GPU
+    /// (Apple's container VMs have none). `env` and `ports` apply as usual; `image` is only a label.
+    public struct Native: Codable, Sendable, Hashable {
+        /// Candidate executable paths; the first that exists is used.
+        public var executables: [String]
+        public var args: [String]?
+        /// Homebrew formula that installs it (`brew install <formula>`).
+        public var brew: String?
+        /// Where to get it without Homebrew.
+        public var download: String?
+    }
+
     public struct Action: Codable, Sendable, Hashable {
         public var description: String
         /// Parameter names; values are substituted as `{name}`. Identifier-safe values only, except params
@@ -61,6 +73,8 @@ public struct Recipe: Codable, Sendable, Identifiable, Hashable {
     public var user: String?
     public var memory: String?
     public var cpus: Int?
+    /// Set for services that run natively on this Mac rather than in a container.
+    public var native: Native?
     public var health: Health?
     public var adminURL: String?
     /// SF Symbol name and accent colour (hex) used by the app.

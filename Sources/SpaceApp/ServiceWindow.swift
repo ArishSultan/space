@@ -18,7 +18,7 @@ struct ServiceWindow: View {
     @State private var recipe: RecipeView?
 
     enum Tab: String, CaseIterable, Identifiable {
-        case overview = "Overview", manage = "Manage", logs = "Logs", config = "Config"
+        case overview = "Overview", models = "Models", manage = "Manage", logs = "Logs", config = "Config"
         var id: String { rawValue }
         var icon: String {
             switch self {
@@ -26,12 +26,14 @@ struct ServiceWindow: View {
             case .logs: "text.alignleft"
             case .config: "slider.horizontal.3"
             case .manage: "square.stack.3d.up"
+            case .models: "cpu"
             }
         }
     }
 
     private var service: ServiceView? { model.services.first { $0.id == serviceID } }
     private var tabs: [Tab] {
+        if serviceID == "ollama" { return [.overview, .models, .logs, .config] }
         guard let r = recipe?.recipe else { return [.overview, .logs, .config] }
         return (r.resources ?? []).isEmpty && r.visibleActions.isEmpty ? [.overview, .logs, .config] : Tab.allCases
     }
@@ -46,6 +48,7 @@ struct ServiceWindow: View {
                     Group {
                         switch tab {
                         case .overview: OverviewTab(service: service)
+                        case .models: ModelsTab(service: service)
                         case .logs: LogsTab(serviceID: serviceID)
                         case .config: ConfigTab(serviceID: serviceID, recipe: $recipe)
                         case .manage:
@@ -88,6 +91,9 @@ struct ServiceHeader: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(service.name).font(.title2.weight(.semibold))
                 Text(service.image).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                if let install = service.install, !install.installed, !install.installing, let error = install.error {
+                    Text(error).font(.caption).foregroundStyle(.red).lineLimit(4).textSelection(.enabled)
+                }
             }
             Spacer()
             GlassEffectContainer(spacing: 6) {
@@ -97,16 +103,46 @@ struct ServiceHeader: View {
                     }
                     Button("Restart", systemImage: "arrow.clockwise") { model.restart(service.id, origin: service.id) }
                         .disabled(!service.isRunning)
-                    Button("Update", systemImage: "arrow.down.circle") { model.pullLatest(service.id, origin: service.id) }
-                        .help("Pull the latest image and recreate (data is kept)")
-                    Button(service.isRunning ? "Stop" : "Start", systemImage: service.isRunning ? "stop.fill" : "play.fill") {
-                        model.setRunning(service, !service.isRunning, origin: service.id)
+                    if service.install?.canUpdate ?? true {
+                        Button("Update", systemImage: "arrow.down.circle") { model.pullLatest(service.id, origin: service.id) }
+                            .help(service.install == nil ? "Pull the latest image and recreate (data is kept)" : "brew upgrade, then restart if it was running")
                     }
-                    .buttonStyle(.glassProminent)
+                    if let install = service.install, !install.installed {
+                        InstallButtons(service: service, install: install)
+                    } else {
+                        Button(service.isRunning ? "Stop" : "Start", systemImage: service.isRunning ? "stop.fill" : "play.fill") {
+                            model.setRunning(service, !service.isRunning, origin: service.id)
+                        }
+                        .buttonStyle(.glassProminent)
+                    }
                 }
                 .buttonStyle(.glass)
                 .disabled(model.busy.contains(service.id))
             }
+        }
+    }
+}
+
+/// Install (Homebrew) for a native service that isn't on this Mac; a download link when Homebrew is missing.
+struct InstallButtons: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openURL) private var openURL
+    let service: ServiceView
+    let install: NativeInstall
+
+    var body: some View {
+        if install.installing {
+            ProgressView().controlSize(.small)
+            Text("Installing with Homebrew…").font(.callout).foregroundStyle(.secondary)
+        } else {
+            if !install.brewAvailable, let url = install.downloadURL.flatMap(URL.init(string:)) {
+                Button("Download", systemImage: "safari") { openURL(url) }
+                    .help("Homebrew isn't installed: download \(service.name) from its website")
+            }
+            Button("Install", systemImage: "arrow.down.circle") { model.install(service) }
+                .buttonStyle(.glassProminent)
+                .disabled(!install.brewAvailable)
+                .help(install.brewAvailable ? "brew install \(install.formula ?? service.id)" : "Needs Homebrew (brew.sh)")
         }
     }
 }
@@ -120,6 +156,17 @@ struct OverviewTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                if let install = service.install, install.installed {
+                    Card("Installation") {
+                        let how = switch install.source {
+                        case .brew: "Installed with Homebrew: Space can update it."
+                        case .app: "Installed as an app: it keeps itself up to date (menu bar icon → Check for Updates)."
+                        default: "Installed outside Homebrew: Space can't update it."
+                        }
+                        Text(how).font(.callout)
+                        if let path = install.path { CopyRow(label: "Path", value: path) }
+                    }
+                }
                 if !service.connection.isEmpty {
                     Card("Connect") {
                         ForEach(service.connection.sorted(by: { $0.key < $1.key }), id: \.key) { key, value in

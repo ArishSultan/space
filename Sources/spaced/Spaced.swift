@@ -7,8 +7,8 @@ struct Spaced: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "spaced",
         abstract: "Space: dev services on Apple container.",
-        subcommands: [Recipes.self, Status.self, Start.self, Stop.self, Restart.self, Recreate.self,
-                      Pull.self, Stats.self, Logs.self, Action.self, Serve.self, Net.self, Hosts.self, ProjectsCommand.self, SystemCommand.self, MCPCommand.self]
+        subcommands: [Recipes.self, Status.self, Install.self, Start.self, Stop.self, Restart.self, Recreate.self,
+                      Pull.self, Stats.self, Logs.self, Action.self, Serve.self, Net.self, Hosts.self, OllamaCommand.self, ProjectsCommand.self, SystemCommand.self, MCPCommand.self]
     )
 
     static func main() async {
@@ -56,6 +56,29 @@ struct Status: AsyncParsableCommand {
 
 struct ServiceArg: ParsableArguments {
     @Argument(help: "Service id") var service: String
+}
+
+struct Install: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Install a service that runs natively (Ollama) with Homebrew, or show how it's installed")
+    @OptionGroup var arg: ServiceArg
+    @OptionGroup var out: JSONFlag
+    func run() async throws {
+        let m = try ServiceManager.live()
+        var info = try await m.installStatus(arg.service)
+        if !info.installed {
+            print("installing \(arg.service) with Homebrew…")
+            try await m.installNativeAndWait(arg.service)
+            info = try await m.installStatus(arg.service)
+        }
+        if out.json { return try printJSON(info) }
+        let how = switch info.source {
+        case .brew: "Homebrew (Space can update it)"
+        case .app: "an app (it updates itself)"
+        case .other: "outside Homebrew (Space can't update it)"
+        case .none: "not installed"
+        }
+        print("\(arg.service): \(how)\(info.path.map { " — \($0)" } ?? "")")
+    }
 }
 
 struct Start: AsyncParsableCommand {

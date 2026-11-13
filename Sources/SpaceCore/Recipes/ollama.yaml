@@ -1,0 +1,27 @@
+id: ollama
+name: Ollama
+icon: cpu.fill
+logo: ollama.png
+color: "#6B7280"
+# Local LLMs. Runs natively on this Mac (not in a container) so models use the Metal GPU: Apple's container
+# VMs have no GPU access. Space starts/stops `ollama serve`, and manages models (download, load, unload).
+image: Native process (Metal GPU)
+native:
+  executables:
+    - /opt/homebrew/bin/ollama
+    - /usr/local/bin/ollama
+    - /Applications/Ollama.app/Contents/Resources/ollama
+  args: [serve]
+  brew: ollama
+  download: https://ollama.com/download
+ports:
+  - { name: api, container: 11434, host: 11434 }
+health:
+  exec: ["http://127.0.0.1:{port.api}/api/version"]
+connection:
+  api: http://localhost:{port.api}
+  openai: http://localhost:{port.api}/v1
+projectEnv:
+  OLLAMA_HOST: http://localhost:{port.api}
+  OLLAMA_BASE_URL: http://localhost:{port.api}
+  OLLAMA_OPENAI_BASE_URL: http://localhost:{port.api}/v1

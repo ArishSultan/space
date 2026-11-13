@@ -21,13 +21,17 @@ public struct ServiceView: Codable, Sendable, Identifiable, Hashable {
     public let color: String?
     /// Part of a stack (e.g. Langfuse's ClickHouse); not shown in the main list.
     public let hidden: Bool?
+    /// Runs as a plain process on this Mac rather than in a container (Ollama): no image to update.
+    public let native: Bool?
+    /// For native services: how it's installed, and whether an install/update is running.
+    public let install: NativeInstall?
 
     public init(id: String, name: String, image: String, state: String, healthy: Bool?, shared: Bool,
                 ports: [String: Int], connection: [String: String], adminURL: String?, icon: String?, color: String?,
-                hidden: Bool? = nil) {
+                hidden: Bool? = nil, native: Bool? = nil, install: NativeInstall? = nil) {
         self.id = id; self.name = name; self.image = image; self.state = state; self.healthy = healthy
         self.shared = shared; self.ports = ports; self.connection = connection; self.adminURL = adminURL
-        self.icon = icon; self.color = color; self.hidden = hidden
+        self.icon = icon; self.color = color; self.hidden = hidden; self.native = native; self.install = install
     }
 
     public var isRunning: Bool { state == "running" }

@@ -14,11 +14,20 @@ menu-bar app, from a CLI (`spaced`), or through an MCP server for coding agents.
 - **Hostnames:** each project endpoint gets `http://<name>.localhost` (default `<endpoint>.<project>.localhost`).
   Browsers resolve `*.localhost` on their own, so there's no DNS, certificate or password setup. Only this
   Mac can use them.
+- **Ollama:** local LLMs. Unlike the other services it runs as a native process, not in a container, because
+  the container VMs have no GPU access and models need Metal. Space starts and stops `ollama serve`. If Ollama
+  isn't on the Mac, **Install** runs `brew install ollama` for you (without Homebrew it links to the download
+  page). Space checks how it got there: a Homebrew install is updated with `brew upgrade`, an Ollama app
+  install updates itself, and an Ollama that is already running is used as is. Download models
+  from the panel, turn each one **on** (loaded in memory and kept there, also after a restart) or **off**
+  (memory freed; it still loads on demand when something uses it), delete them, and set how many models stay
+  loaded, the idle timeout and parallel requests. Share it like any service to use it from another Mac.
+  The OpenAI-compatible API is at `http://localhost:11434/v1`.
 - **Other Macs:** sign in to Tailscale once, inside Space; no Tailscale app needed. You can then share
   services, use another Mac's services on `localhost`, or switch the panel to control another Mac.
   Only devices signed in with your Tailscale account can connect.
-- **Agents:** the MCP server exposes 39 tools: services, logs, databases, buckets, projects (endpoints and resource
-  links), mail, hostnames and sharing.
+- **Agents:** the MCP server exposes 47 tools: services, logs, databases, buckets, projects (endpoints and resource
+  links), mail, hostnames, sharing and Ollama models (on this Mac or a peer).
 - **Maintenance:** set the image for each app, update all apps, see disk usage, and reclaim space.
 
 ## Requirements
@@ -104,7 +113,9 @@ spaced project create shop --endpoint api:3100 --endpoint portal:3101 \
     --uses postgres/databases/shop+ --uses redis       # a trailing + creates it first
 spaced project add-endpoint shop admin:3102            # http://admin.shop.localhost → localhost:3102
 spaced project env shop > .env
+spaced install ollama                                      # install with Homebrew, or show how it is installed
 spaced net login | share postgres | mount <peer> postgres
+spaced ollama ls | pull llama3.2 | load llama3.2 | unload llama3.2 | rm llama3.2 | settings --max-loaded 2
 spaced system disk | reclaim | update-all
 ```
 
@@ -118,6 +129,7 @@ spaced system disk | reclaim | update-all
 | Mailpit | SMTP `localhost:1025`, UI at http://mailpit.localhost |
 | S3 Storage | `http://localhost:9000`, access key and secret `spaceadmin`, region `us-east-1`, path-style. No web console: manage buckets in Space. |
 | Langfuse | http://langfuse.localhost (`dev@space.test` / `spacespace`), keys `pk-lf-space` / `sk-lf-space` |
+| Ollama | `http://localhost:11434` (OpenAI-compatible: `/v1`). No login. |
 
 Containers reach shared services at `192.168.64.1:<port>`. `spaced` relays that address to localhost.
 

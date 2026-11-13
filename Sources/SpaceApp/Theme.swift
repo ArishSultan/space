@@ -111,6 +111,63 @@ struct ConnectedClientsAlert: ViewModifier {
     }
 }
 
+/// Confirmations inside the menu-bar panel (see `AppModel.PanelAlert`): "clients are connected" for operations
+/// started from the panel, and any alert a panel row asks for. Drawn as an overlay, so focus never leaves the panel.
+struct PanelAlerts: ViewModifier {
+    @Environment(AppModel.self) private var model
+
+    private var current: AppModel.PanelAlert? {
+        if let alert = model.panelAlert { return alert }
+        guard let c = model.confirmation, c.origin == "popover" else { return nil }
+        let shown = c.clients.clients.prefix(8)
+        let more = c.clients.clients.count - shown.count
+        return .init(
+            title: "\(c.serviceName) has \(c.clients.count) connected client\(c.clients.count == 1 ? "" : "s")",
+            message: (Array(shown) + (more > 0 ? ["and \(more) more…"] : [])).joined(separator: "\n") + "\n\nThey will be disconnected.",
+            confirm: "\(c.verb) anyway", action: c.proceed)
+    }
+
+    private func dismiss() {
+        model.panelAlert = nil
+        if model.confirmation?.origin == "popover" { model.confirmation = nil }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if let alert = current {
+                    ZStack {
+                        Rectangle().fill(.black.opacity(0.28)).onTapGesture(perform: dismiss)
+                        VStack(spacing: 12) {
+                            Text(alert.title).font(.headline).multilineTextAlignment(.center)
+                            ScrollView {
+                                Text(alert.message).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .frame(maxHeight: 160)
+                            .fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: 8) {
+                                Button("Cancel", action: dismiss)
+                                    .keyboardShortcut(.cancelAction)
+                                Button(alert.confirm) { alert.action(); dismiss() }
+                                    .buttonStyle(.glassProminent)
+                                    .tint(alert.destructive ? .red : nil)
+                                    .keyboardShortcut(.defaultAction)
+                            }
+                            .buttonStyle(.glass)
+                        }
+                        .padding(18)
+                        .frame(width: 320)
+                        .glassEffect(in: .rect(cornerRadius: 18))
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: current?.title)
+    }
+}
+
 extension View {
+    func panelAlerts() -> some View { modifier(PanelAlerts()) }
     func connectedClientsAlert(origin: String) -> some View { modifier(ConnectedClientsAlert(origin: origin)) }
 }

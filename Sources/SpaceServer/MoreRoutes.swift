@@ -44,6 +44,8 @@ extension SpaceServer {
                 ctx.parameters.require("name"), ResourceLinkRequest(service: service, kind: q.get("kind"), name: q.get("name"))))
         }
 
+        ollamaRoutes(r, services: services)
+
         // Maintenance
         api.get("system/disk") { _, _ in Reply(try await services.diskUsage()) }
         api.post("system/reclaim") { req, ctx in
